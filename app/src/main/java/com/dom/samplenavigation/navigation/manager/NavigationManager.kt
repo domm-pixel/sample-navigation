@@ -30,11 +30,15 @@ class NavigationManager(
     
     private val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
     
-    private val _navigationState = MutableLiveData<NavigationState>()
+    private val _navigationState = MutableLiveData(NavigationState())
     val navigationState: LiveData<NavigationState> = _navigationState
     
     private val _currentInstruction = MutableLiveData<Instruction?>()
     val currentInstruction: LiveData<Instruction?> = _currentInstruction
+    
+    // 음성 안내 트리거용 LiveData
+    private val _shouldPlayVoice = MutableLiveData<Boolean>()
+    val shouldPlayVoice: LiveData<Boolean> = _shouldPlayVoice
     
     private val _permissionRequired = MutableLiveData<Boolean>()
     val permissionRequired: LiveData<Boolean> = _permissionRequired
@@ -44,6 +48,7 @@ class NavigationManager(
     private var currentInstructionIndex = 0
     private var isNavigating = false
     private var lastAnnouncedInstruction: String? = null
+    private var lastAnnouncedDistance: Int = -1  // 마지막으로 안내한 거리 구간
     
     // 안정적인 베어링 계산을 위한 변수들
     private var currentBearing: Float = 0f
@@ -116,6 +121,7 @@ class NavigationManager(
         currentRoute = null
         currentInstructionIndex = 0
         lastAnnouncedInstruction = null
+        lastAnnouncedDistance = -1
         currentBearing = 0f
         previousLocation = null
         
@@ -166,6 +172,86 @@ class NavigationManager(
     }
     
     /**
+     * 현재 위치 업데이트 (외부에서 호출)
+     */
+    fun updateCurrentLocation(latLng: LatLng) {
+        currentLocation = latLng
+        
+        // 네비게이션 상태 업데이트
+        _navigationState.value = _navigationState.value?.copy(currentLocation = latLng)
+        
+        if (isNavigating) {
+            // 네비게이션 업데이트 (Location 객체 없이)
+            val route = currentRoute ?: return
+            
+            // 현재 안내 지점까지의 거리 계산
+            val currentInstruction = route.instructions.getOrNull(currentInstructionIndex)
+            if (currentInstruction != null) {
+                val distance = calculateDistance(latLng, currentInstruction.location).toInt()
+                
+                // 🔄 실시간 거리 업데이트 (항상 업데이트)
+                _currentInstruction.value = currentInstruction.copy(distanceToInstruction = distance)
+                
+                // 🔊 단계별 음성 안내 (특정 구간 진입 시에만 음성 재생)
+                when {
+                    distance <= 50 && lastAnnouncedDistance > 50 -> {
+                        lastAnnouncedDistance = 50
+                        _shouldPlayVoice.value = true
+                        Timber.d("📢 [즉시] 현재 거리: ${distance}m - VOICE TRIGGERED")
+                    }
+                    distance in 51..150 && lastAnnouncedDistance > 100 -> {
+                        lastAnnouncedDistance = 100
+                        _shouldPlayVoice.value = true
+                        Timber.d("📢 [100m 구간] 현재 거리: ${distance}m - VOICE TRIGGERED")
+                    }
+                    distance in 151..400 && lastAnnouncedDistance > 300 -> {
+                        lastAnnouncedDistance = 300
+                        _shouldPlayVoice.value = true
+                        Timber.d("📢 [300m 구간] 현재 거리: ${distance}m - VOICE TRIGGERED")
+                    }
+                    distance in 401..700 && lastAnnouncedDistance > 500 -> {
+                        lastAnnouncedDistance = 500
+                        _shouldPlayVoice.value = true
+                        Timber.d("📢 [500m 구간] 현재 거리: ${distance}m - VOICE TRIGGERED")
+                    }
+                    distance > 700 && lastAnnouncedDistance == -1 -> {
+                        // 최초 안내 시작 (700m 이상일 때)
+                        lastAnnouncedDistance = 1000
+                        _shouldPlayVoice.value = true
+                        Timber.d("📢 [초기 안내] 현재 거리: ${distance}m - VOICE TRIGGERED")
+                    }
+                }
+                
+                // 다음 안내로 이동 (30미터 이내)
+                if (distance <= 30) {
+                    currentInstructionIndex++
+                    lastAnnouncedDistance = -1
+                    updateCurrentInstruction()
+                }
+            }
+            
+            // 진행률 계산
+            val progress = calculateProgress(latLng, route)
+            
+            // 남은 거리 계산
+            val remainingDistance = calculateRemainingDistance(latLng, route)
+            
+            // 네비게이션 상태 업데이트
+            _navigationState.value = NavigationState(
+                isNavigating = true,
+                currentLocation = latLng,
+                currentInstruction = currentInstruction,
+                nextInstruction = route.instructions.getOrNull(currentInstructionIndex + 1),
+                remainingDistance = remainingDistance,
+                progress = progress,
+                currentRoute = route
+            )
+            
+            Timber.d("📍 Navigation updated with currentLocation: $latLng")
+        }
+    }
+    
+    /**
      * 네비게이션 업데이트
      */
     private fun updateNavigation(location: LatLng, locationObj: Location) {
@@ -174,23 +260,47 @@ class NavigationManager(
         // 현재 안내 지점까지의 거리 계산
         val currentInstruction = route.instructions.getOrNull(currentInstructionIndex)
         if (currentInstruction != null) {
-            val distance = calculateDistance(location, currentInstruction.location)
+            val distance = calculateDistance(location, currentInstruction.location).toInt()
             
-            // 안내 메시지 업데이트 (300미터 이내일 때)
-            if (distance <= 300) {
-                // 이전에 발표한 안내와 다른 경우에만 업데이트
-                val instructionMessage = currentInstruction.message
-                if (instructionMessage != lastAnnouncedInstruction) {
-                    _currentInstruction.value = currentInstruction
-                    lastAnnouncedInstruction = instructionMessage
-                    Timber.d("📢 New instruction announced: $instructionMessage")
+            // 🔄 실시간 거리 업데이트 (항상 업데이트)
+            _currentInstruction.value = currentInstruction.copy(distanceToInstruction = distance)
+            
+            // 🔊 단계별 음성 안내 (특정 구간 진입 시에만 음성 재생)
+            when {
+                distance <= 50 && lastAnnouncedDistance > 50 -> {
+                    lastAnnouncedDistance = 50
+                    _shouldPlayVoice.value = true
+                    Timber.d("📢 [즉시] 현재 거리: ${distance}m - VOICE TRIGGERED")
                 }
-                
-                // 다음 안내로 이동
-                if (distance <= 50) { // 50미터 이내면 다음 안내로
-                    currentInstructionIndex++
-                    updateCurrentInstruction()
+                distance in 51..150 && lastAnnouncedDistance > 100 -> {
+                    lastAnnouncedDistance = 100
+                    _shouldPlayVoice.value = true
+                    Timber.d("📢 [100m 구간] 현재 거리: ${distance}m - VOICE TRIGGERED")
                 }
+                distance in 151..400 && lastAnnouncedDistance > 300 -> {
+                    lastAnnouncedDistance = 300
+                    _shouldPlayVoice.value = true
+                    Timber.d("📢 [300m 구간] 현재 거리: ${distance}m - VOICE TRIGGERED")
+                }
+                distance in 401..700 && lastAnnouncedDistance > 500 -> {
+                    lastAnnouncedDistance = 500
+                    _shouldPlayVoice.value = true
+                    Timber.d("📢 [500m 구간] 현재 거리: ${distance}m - VOICE TRIGGERED")
+                }
+                distance > 700 && lastAnnouncedDistance == -1 -> {
+                    // 최초 안내 시작 (700m 이상일 때)
+                    lastAnnouncedDistance = 1000
+                    _shouldPlayVoice.value = true
+                    Timber.d("📢 [초기 안내] 현재 거리: ${distance}m - VOICE TRIGGERED")
+                }
+            }
+            
+            // 다음 안내로 이동 (30미터 이내)
+            if (distance <= 30) {
+                currentInstructionIndex++
+                lastAnnouncedDistance = -1  // 다음 안내를 위해 초기화
+                updateCurrentInstruction()
+                Timber.d("✅ Moving to next instruction (${currentInstructionIndex})")
             }
         }
         

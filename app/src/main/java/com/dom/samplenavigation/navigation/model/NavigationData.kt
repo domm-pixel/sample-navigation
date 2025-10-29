@@ -21,7 +21,8 @@ data class Instruction(
     val message: String,            // 안내 메시지
     val pointIndex: Int,            // 경로상의 위치 인덱스
     val type: Int,                  // 안내 타입 (좌회전, 우회전 등)
-    val location: LatLng           // 안내 지점의 좌표
+    val location: LatLng,          // 안내 지점의 좌표
+    val distanceToInstruction: Int = 0  // 현재 위치에서 안내 지점까지의 거리 (미터)
 )
 
 /**
@@ -33,7 +34,8 @@ data class RouteSummary(
     val startLocation: LatLng,      // 출발지
     val endLocation: LatLng,        // 도착지
     val fuelPrice: Int,             // 연료비
-    val taxiFare: Int              // 택시비
+    val taxiFare: Int,              // 택시비
+    val tollFare: Int               // 통행료
 )
 
 /**

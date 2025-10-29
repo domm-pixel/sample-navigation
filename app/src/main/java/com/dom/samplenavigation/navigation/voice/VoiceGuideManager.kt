@@ -73,28 +73,40 @@ class VoiceGuideManager(
     }
 
     /**
-     * 안내 메시지 포맷팅
+     * 안내 메시지 포맷팅 (실시간 거리 사용)
      */
     private fun formatInstructionMessage(instruction: Instruction): String {
-        val distance = instruction.distance
-        val message = instruction.message
+        // 실시간 거리 사용 (distanceToInstruction)
+        val distance = instruction.distanceToInstruction
+        
+        // API 메시지에서 거리 정보 제거
+        val cleanMessage = instruction.message
+            .replace(Regex("\\d+\\s*킬로미터\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\s*미터\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\.?\\d*\\s*km\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\s*m\\s*(후|전방|앞)\\s*"), "")
+            .trim()
 
+        // 실시간 거리로 메시지 생성
         return when {
             distance >= 1000 -> {
-                val km = distance / 1000
-                "${km}킬로미터 후 $message"
+                val km = distance / 1000.0
+                "${String.format("%.1f", km)}킬로미터 후 $cleanMessage"
             }
-
+            distance >= 500 -> {
+                "500미터 후 $cleanMessage"
+            }
+            distance >= 300 -> {
+                "300미터 후 $cleanMessage"
+            }
             distance >= 100 -> {
-                val hm = distance / 100
-                "${hm}백미터 후 $message"
+                val hm = (distance / 100) * 100  // 100m 단위로 반올림
+                "${hm}미터 후 $cleanMessage"
             }
-
             distance >= 50 -> {
-                "50미터 후 $message"
+                "곧 $cleanMessage"
             }
-
-            else -> message
+            else -> cleanMessage
         }
     }
 

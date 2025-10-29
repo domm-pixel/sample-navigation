@@ -84,7 +84,8 @@ object NavigationMapper {
                 startLocation = startLocation,
                 endLocation = endLocation,
                 fuelPrice = s.fuelPrice ?: 0,
-                taxiFare = s.taxiFare ?: 0
+                taxiFare = s.taxiFare ?: 0,
+                tollFare = s.tollFare ?: 0
             )
         } ?: return null
         

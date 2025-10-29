@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -70,7 +71,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                 // 키보드 숨기기
                 hideKeyboard()
                 
-                val destination = tvDestination.text.toString()
+                val destination = etDestination.text.toString()
                 if (destination.isEmpty() || destination == "목적지를 입력하세요") {
                     Toast.makeText(this@MainActivity, "목적지를 입력해주세요", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
@@ -99,6 +100,9 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                         // 여기서는 간단하게 start/end 위치만 전달하고 NavigationActivity에서 다시 조회하도록 합니다
                     }
                     startActivity(intent)
+                    
+                    // 안내 시작 후 경로 및 주소 정보 초기화
+                    clearRoute()
                 }
             }
         }
@@ -130,6 +134,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                 route?.let {
                     currentRoute = it
                     displayRoute(it)
+                    
+                    // 경로 정보 다이얼로그 표시 (비용 정보 포함)
+                    showRouteInfoDialog(it)
+                    
                     // 안내 시작 버튼 표시
                     btnStartNavigation.visibility = View.VISIBLE
                     Timber.d("✅ Route displayed, navigation button shown")
@@ -373,6 +381,25 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         Timber.d("📍 Current location updated: $latLng")
     }
     
+    override fun onResume() {
+        super.onResume()
+        // NavigationActivity에서 돌아왔을 때 경로 초기화
+        // (안내가 끝나고 돌아온 경우)
+        if (currentRoute != null && !isNavigationActive()) {
+            clearRoute()
+        }
+    }
+    
+    /**
+     * 현재 네비게이션이 활성 상태인지 확인
+     */
+    private fun isNavigationActive(): Boolean {
+        // NavigationActivity가 현재 실행 중인지 확인하는 간단한 방법
+        // 실제로는 SharedPreferences나 다른 방법을 사용할 수 있지만
+        // 여기서는 간단하게 처리
+        return false
+    }
+    
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -386,5 +413,90 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                 Timber.w("📍 Location permission denied")
             }
         }
+    }
+    
+    /**
+     * 경로 및 주소 정보 초기화
+     */
+    private fun clearRoute() {
+        // 경로 오버레이 제거
+        pathOverlays.forEach { it.map = null }
+        pathOverlays.clear()
+        
+        // 마커 제거
+        startMarker?.map = null
+        endMarker?.map = null
+        startMarker = null
+        endMarker = null
+        
+        // 경로 데이터 초기화
+        currentRoute = null
+        
+        // EditText 초기화
+        binding {
+            etDestination.text.clear()
+        }
+        
+        // ViewModel의 주소 정보 초기화
+        mainViewModel.destinationAddress = null
+        
+        // 안내 시작 버튼 숨기기
+        binding {
+            btnStartNavigation.visibility = View.GONE
+        }
+        
+        Timber.d("🔄 Route and destination cleared")
+    }
+    
+    /**
+     * 경로 정보 다이얼로그 표시 (비용 정보 포함)
+     */
+    private fun showRouteInfoDialog(route: NavigationRoute) {
+        val distanceKm = route.summary.totalDistance / 1000.0
+        
+        // API에서 제공하는 duration 사용 (밀리초 단위)
+        val durationMin = route.summary.totalDuration / 1000 / 60
+        
+        val tollFare = route.summary.tollFare
+//        val fuelPrice = route.summary.fuelPrice
+//        val taxiFare = route.summary.taxiFare
+
+        val message = buildString {
+            append("📍 거리: ${String.format("%.1f", distanceKm)}km\n")
+            
+            // 시간 표시 개선 (1시간 이상일 때 "X시간 Y분"으로 표시)
+            val timeString = if (durationMin >= 60) {
+                val hours = durationMin / 60
+                val mins = durationMin % 60
+                if (mins > 0) "${hours}시간 ${mins}분" else "${hours}시간"
+            } else {
+                "${durationMin}분"
+            }
+            append("⏱️ 소요 시간: 약 ${timeString}\n\n")
+
+            // 비용 정보
+//            var hasCost = false
+            if (tollFare > 0) {// || fuelPrice > 0 || taxiFare > 0) {
+                append("💰 예상 비용:\n")
+                if (tollFare > 0) {
+                    append("   • 통행료: ${String.format("%,d", tollFare)}원\n")
+//                    hasCost = true
+                }
+//                if (fuelPrice > 0) {
+//                    append("   • 유류비: ${String.format("%,d", fuelPrice)}원\n")
+//                    hasCost = true
+//                }
+//                if (taxiFare > 0) {
+//                    append("   • 택시 요금: ${String.format("%,d", taxiFare)}원\n")
+//                    hasCost = true
+//                }
+            }
+        }
+        
+        AlertDialog.Builder(this)
+            .setTitle("경로 정보")
+            .setMessage(message)
+            .setPositiveButton("확인", null)
+            .show()
     }
 }

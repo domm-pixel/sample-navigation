@@ -26,7 +26,7 @@
 
             <!-- 목적지 입력 -->
             <EditText
-                android:id="@+id/tvDestination"
+                android:id="@+id/etDestination"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:autofillHints="서울특별시 강남구 테헤란로 231"

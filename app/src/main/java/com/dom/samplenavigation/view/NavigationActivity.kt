@@ -2,8 +2,12 @@ package com.dom.samplenavigation.view
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Bundle
 import android.view.View
 import android.widget.Toast
@@ -57,7 +61,6 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var currentLocationMarker: Marker? = null
     private var isMapReady = false
     private var lastBearing: Float = 0f
-    private var lastSpokenInstruction: String? = null
     private var isNavigationModeActive = false
     private var previousLocationForBearing: LatLng? = null
     private var currentPathIndex: Int = 0  // 현재 경로상 위치 인덱스
@@ -71,9 +74,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     companion object {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1001
-        private const val OFF_ROUTE_THRESHOLD = 15f  // 오차 범위 (미터)
+        private const val OFF_ROUTE_THRESHOLD = 30f  // 오차 범위 (미터) - GPS 오차를 고려하여 증가
         private const val ARRIVAL_THRESHOLD = 25f  // 도착 판정 거리 (미터)
-        private const val REROUTE_THRESHOLD = 60f  // 경로 재검색 임계값 (미터)
+        private const val REROUTE_THRESHOLD = 70f  // 경로 재검색 임계값 (미터) - OFF_ROUTE보다 충분히 큼
         private const val GESTURE_TIMEOUT = 10000L  // 제스처 모드 자동 복귀 시간 (10초)
     }
 
@@ -155,6 +158,12 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private fun setupObservers() {
         // 네비게이션 상태 관찰
         navigationManager.navigationState.observe(this) { state ->
+            // state가 null이면 아무것도 하지 않음
+            if (state == null) {
+                Timber.w("⚠️ Navigation state is null")
+                return@observe
+            }
+            
             updateNavigationUI(state)
 
             // 네비게이션 모드 자동 전환
@@ -260,17 +269,21 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             }
         }
         
-        // 현재 안내 메시지 관찰
+        // 현재 안내 메시지 관찰 (UI 업데이트만)
         navigationManager.currentInstruction.observe(this) { instruction ->
             instruction?.let {
                 updateInstructionUI(it)
-                
-                // 음성 안내 중복 방지
-                val instructionMessage = it.message
-                if (voiceGuideManager.isReady() && instructionMessage != lastSpokenInstruction) {
-                    voiceGuideManager.speakInstruction(it)
-                    lastSpokenInstruction = instructionMessage
-                    Timber.d("🔊 Voice instruction spoken: $instructionMessage")
+            }
+        }
+        
+        // 음성 안내 트리거 관찰 (음성 재생만)
+        navigationManager.shouldPlayVoice.observe(this) { shouldPlay ->
+            if (shouldPlay == true) {
+                navigationManager.currentInstruction.value?.let { instruction ->
+                    if (voiceGuideManager.isReady()) {
+                        voiceGuideManager.speakInstruction(instruction)
+                        Timber.d("🔊 Voice instruction spoken: ${instruction.message}")
+                    }
                 }
             }
         }
@@ -421,37 +434,82 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      * 현재 위치 모드로 복귀
      */
     private fun returnToCurrentLocationMode() {
+        Timber.d("🎯 returnToCurrentLocationMode() called")
+        Timber.d("🎯 Current state - isGestureMode: $isGestureMode, isNavigating: ${navigationManager.navigationState.value?.isNavigating}, currentLocation: ${navigationManager.navigationState.value?.currentLocation}")
+        
         isGestureMode = false
         
         // 단색 경로로 복귀
         navigationManager.navigationState.value?.currentRoute?.let { route ->
             displayRoute(route)
+            Timber.d("🎯 Route displayed (single color)")
         }
         
         // 네비게이션 모드 재활성화 (수동 카메라 제어로 복귀)
         // 네비게이션 중이면 자동으로 startNavigationMode()가 호출되므로 여기서는 명시적으로 호출
         if (navigationManager.navigationState.value?.isNavigating == true) {
             startNavigationMode()
+            Timber.d("🎯 Navigation mode reactivated")
         }
         
         // UI 업데이트
         updateNavigationUI(navigationManager.navigationState.value ?: NavigationState())
         
         // 현재 위치로 카메라 이동 (저장된 줌과 방향 유지)
-        navigationManager.navigationState.value?.currentLocation?.let { location ->
-            naverMap?.let { map ->
-                val bearing = if (lastNavigationBearing > 0) lastNavigationBearing else {
-                    // 방향이 없으면 경로 기반으로 계산
-                    val route = navigationManager.navigationState.value?.currentRoute
-                    if (route != null && currentPathIndex < route.path.size - 1) {
-                        calculateBearingFromPath(route.path, currentPathIndex)
-                    } else {
-                        lastBearing
-                    }
+        val currentLocation = navigationManager.navigationState.value?.currentLocation
+        val currentRoute = navigationManager.navigationState.value?.currentRoute
+        
+        if (currentLocation != null && naverMap != null) {
+            Timber.d("🎯 Moving camera to current location: $currentLocation")
+            
+            val bearing = if (lastNavigationBearing > 0) {
+                Timber.d("🎯 Using last navigation bearing: $lastNavigationBearing")
+                lastNavigationBearing
+            } else {
+                // 방향이 없으면 경로 기반으로 계산
+                if (currentRoute != null && currentPathIndex < currentRoute.path.size - 1) {
+                    val pathBearing = calculateBearingFromPath(currentRoute.path, currentPathIndex)
+                    Timber.d("🎯 Calculated bearing from path: $pathBearing")
+                    pathBearing
+                } else {
+                    Timber.d("🎯 Using last bearing: $lastBearing")
+                    lastBearing
+                }
+            }
+            
+            val cameraPosition = CameraPosition(
+                currentLocation,
+                lastNavigationZoom,
+                0.0,
+                bearing.toDouble()
+            )
+            
+            val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
+                .animate(CameraAnimation.Easing, 200)
+            naverMap?.moveCamera(cameraUpdate)
+            
+            Timber.d("🎯 Camera moved to current location - zoom=${lastNavigationZoom}, bearing=$bearing°")
+        } else {
+            // 현재 위치가 없으면 경로의 시작점으로 이동
+            if (currentRoute != null && naverMap != null) {
+                val startLocation = if (currentPathIndex < currentRoute.path.size) {
+                    currentRoute.path[currentPathIndex]
+                } else {
+                    currentRoute.summary.startLocation
+                }
+                
+                Timber.w("⚠️ Current location is null, using route location: $startLocation")
+                
+                val bearing = if (lastNavigationBearing > 0) {
+                    lastNavigationBearing
+                } else if (currentPathIndex < currentRoute.path.size - 1) {
+                    calculateBearingFromPath(currentRoute.path, currentPathIndex)
+                } else {
+                    lastBearing
                 }
                 
                 val cameraPosition = CameraPosition(
-                    location,
+                    startLocation,
                     lastNavigationZoom,
                     0.0,
                     bearing.toDouble()
@@ -459,13 +517,16 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 
                 val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
                     .animate(CameraAnimation.Easing, 200)
-                map.moveCamera(cameraUpdate)
+                naverMap?.moveCamera(cameraUpdate)
                 
-                Timber.d("🎯 Returned to current location mode - zoom=${lastNavigationZoom}, bearing=$bearing°")
+                Timber.d("🎯 Camera moved to route location: $startLocation")
+            } else {
+                Timber.e("❌ Cannot return to location - currentLocation: null, currentRoute: ${currentRoute != null}, naverMap: ${naverMap != null}")
+                Toast.makeText(this, "현재 위치를 가져올 수 없습니다. GPS를 확인해주세요.", Toast.LENGTH_SHORT).show()
             }
         }
         
-        Timber.d("🎯 Returned to current location mode - navigation mode reactivated")
+        Timber.d("🎯 Returned to current location mode complete")
     }
     
     /**
@@ -478,9 +539,16 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     }
 
     private fun checkLocationPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
-            != PackageManager.PERMISSION_GRANTED) {
+        val hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        Timber.d("📍 checkLocationPermission() - hasPermission: $hasPermission")
+        
+        if (!hasPermission) {
+            Timber.d("📍 Requesting location permission")
             requestLocationPermission()
+        } else {
+            // 권한이 이미 허용된 경우 위치 업데이트 시작
+            Timber.d("📍 Permission already granted, starting location updates")
+            startLocationUpdates()
         }
     }
     
@@ -502,13 +570,112 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 Timber.d("📍 Location permission granted")
-                // 권한이 허용되면 네비게이션 재시작
-                navigationManager.retryNavigation()
+                // 권한이 허용되면 위치 업데이트 시작
+                startLocationUpdates()
             } else {
                 Timber.w("📍 Location permission denied")
                 // 권한이 거부되면 에러 메시지 표시
                 binding.tvCurrentInstruction.text = "위치 권한이 필요합니다. 설정에서 권한을 허용해주세요."
             }
+        }
+    }
+    
+    /**
+     * 위치 업데이트 시작
+     */
+    @RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
+    private fun startLocationUpdates() {
+        Timber.d("📍 startLocationUpdates() called")
+        
+        try {
+            val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            
+            // GPS가 활성화되어 있는지 확인
+            val isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+            val isNetworkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+            
+            Timber.d("📍 GPS enabled: $isGpsEnabled, Network enabled: $isNetworkEnabled")
+            
+            if (!isGpsEnabled && !isNetworkEnabled) {
+                Timber.w("📍 Both GPS and Network are disabled")
+                binding.tvCurrentInstruction.text = "위치 서비스가 비활성화되어 있습니다. 설정에서 GPS를 켜주세요."
+                return
+            }
+            
+            // GPS 우선, 없으면 네트워크 사용
+            val provider = if (isGpsEnabled) {
+                LocationManager.GPS_PROVIDER
+            } else {
+                LocationManager.NETWORK_PROVIDER
+            }
+            
+            Timber.d("📍 Using location provider: $provider")
+            
+            // 위치 업데이트 요청
+            locationManager.requestLocationUpdates(
+                provider,
+                1000L, // 1초마다 업데이트
+                1f,    // 1미터 이동시 업데이트
+                locationListener
+            )
+            
+            Timber.d("📍 Location updates requested from provider: $provider")
+            
+            // 마지막 알려진 위치로 즉시 업데이트
+            val lastKnownLocation = locationManager.getLastKnownLocation(provider)
+            if (lastKnownLocation != null) {
+                val latLng = LatLng(lastKnownLocation.latitude, lastKnownLocation.longitude)
+                updateCurrentLocation(latLng)
+                Timber.d("📍 Using last known location: $latLng")
+            } else {
+                Timber.w("📍 No last known location available")
+            }
+            
+            Timber.d("📍 Location updates started successfully")
+        } catch (e: SecurityException) {
+            Timber.e("📍 Location permission not granted: ${e.message}")
+            binding.tvCurrentInstruction.text = "위치 권한이 필요합니다."
+        } catch (e: Exception) {
+            Timber.e("📍 Error starting location updates: ${e.message}")
+            binding.tvCurrentInstruction.text = "위치 업데이트 중 오류가 발생했습니다."
+        }
+    }
+    
+    /**
+     * 위치 리스너
+     */
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            val latLng = LatLng(location.latitude, location.longitude)
+            updateCurrentLocation(latLng)
+            Timber.d("📍 Location updated: $latLng")
+        }
+        
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {
+            Timber.d("📍 Location status changed: $provider, status: $status")
+        }
+        
+        override fun onProviderEnabled(provider: String) {
+            Timber.d("📍 Location provider enabled: $provider")
+        }
+        
+        override fun onProviderDisabled(provider: String) {
+            Timber.w("📍 Location provider disabled: $provider")
+        }
+    }
+    
+    /**
+     * 현재 위치 업데이트
+     */
+    private fun updateCurrentLocation(latLng: LatLng) {
+        // NavigationManager에 현재 위치 업데이트
+        navigationManager.updateCurrentLocation(latLng)
+        // 현재 위치 마커 업데이트
+        updateCurrentLocationMarker(latLng)
+        
+        // 네비게이션 중이고 제스처 모드가 아닐 때만 자동 추적
+        if (navigationManager.navigationState.value?.isNavigating == true && !isGestureMode) {
+            followRoute(latLng)
         }
     }
 
@@ -738,12 +905,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 남은 거리 및 시간 업데이트
         val distanceKm = state.remainingDistance / 1000f
         
-        // 남은 시간 계산 - 경로의 총 시간을 기반으로 진행률 적용
+        // 남은 시간 계산 - API의 duration(밀리초)을 기반으로 진행률 적용
         val remainingTimeMinutes = state.currentRoute?.let { route ->
-            val totalDuration = route.summary.totalDuration // 초 단위
+            val totalDurationMs = route.summary.totalDuration // 밀리초 단위
             val progress = state.progress
+            
             // 남은 시간 = 총 시간 * (1 - 진행률)
-            ((totalDuration * (1.0 - progress)) / 60.0).toInt()
+            val remainingMs = (totalDurationMs * (1.0 - progress)).toInt()
+            remainingMs / 1000 / 60 // 밀리초 → 초 → 분
         } ?: if (distanceKm > 0) {
             // 경로 정보가 없으면 거리 기반 계산 (시속 40km로 가정)
             (distanceKm / 40f * 60f).toInt()
@@ -758,19 +927,61 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         Timber.d("   Progress: ${(state.progress * 100).toInt()}%")
         Timber.d("   Current Location: ${state.currentLocation}")
         
-        binding.tvRemainingDistance.text = "남은 거리: ${String.format("%.1f", distanceKm)}km"
-        binding.tvRemainingTime.text = "남은 시간: ${remainingTimeMinutes}분"
+        // 시간 표시 개선 (1시간 이상일 때 "X시간 Y분"으로 표시)
+        val timeString = if (remainingTimeMinutes >= 60) {
+            val hours = remainingTimeMinutes / 60
+            val mins = remainingTimeMinutes % 60
+            if (mins > 0) "${hours}시간 ${mins}분" else "${hours}시간"
+        } else {
+            "${remainingTimeMinutes}분"
+        }
         
+        binding.tvRemainingDistance.text = "남은 거리: ${String.format("%.1f", distanceKm)}km"
+        binding.tvRemainingTime.text = "남은 시간: ${timeString}"
+
         // 현재 경로가 있으면 지도에 표시
         state.currentRoute?.let { route ->
             if (naverMap != null && pathOverlays.isEmpty()) {
                 displayRoute(route)
             }
         }
+
+        // 위치가 들어오면 마커와 카메라를 즉시 갱신 (제스처 모드가 아닐 때만 자동 추적)
+        if (state.isNavigating && !isGestureMode) {
+            state.currentLocation?.let { loc ->
+                updateCurrentLocationMarker(loc)
+                followRoute(loc)
+            } ?: run {
+                Timber.w("📍 Current Location is null in state during navigation - waiting for next update")
+            }
+        }
     }
 
     private fun updateInstructionUI(instruction: Instruction) {
-        binding.tvCurrentInstruction.text = instruction.message
+        // NavigationManager에서 계산된 거리 정보 사용
+        val distanceToInstruction = instruction.distanceToInstruction
+        
+        // API 메시지에서 거리 정보 제거 (예: "500미터 후", "1킬로미터 후" 등)
+        val cleanMessage = instruction.message
+            .replace(Regex("\\d+\\s*킬로미터\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\s*미터\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\.?\\d*\\s*km\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\s*m\\s*(후|전방|앞)\\s*"), "")
+            .trim()
+        
+        // 실시간 거리 정보와 함께 메시지 표시
+        val messageWithDistance = if (distanceToInstruction > 0) {
+            if (distanceToInstruction >= 1000) {
+                val km = distanceToInstruction / 1000.0
+                "[${String.format("%.1f", km)}km] $cleanMessage"
+            } else {
+                "[${distanceToInstruction}m] $cleanMessage"
+            }
+        } else {
+            cleanMessage
+        }
+        
+        binding.tvCurrentInstruction.text = messageWithDistance
         
         // 다음 안내 메시지 표시 (간단한 예시)
         val nextMessage = if (instruction.distance > 1000) {
@@ -1114,7 +1325,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         )
         return results[0]
     }
-
+    
     /**
      * 베어링 각도를 0~360도 범위로 정규화
      */
@@ -1312,6 +1523,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         stopNavigationMode()
         navigationManager.stopNavigation()
         voiceGuideManager.release()
-        lastSpokenInstruction = null
+        
+        // 위치 업데이트 중지
+        try {
+            val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            locationManager.removeUpdates(locationListener)
+            Timber.d("📍 Location updates stopped")
+        } catch (e: Exception) {
+            Timber.e("📍 Error stopping location updates: ${e.message}")
+        }
     }
 }
