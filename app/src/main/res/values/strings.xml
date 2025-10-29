@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">SampleNavigation</string>
+    <string name="naverMapClientId" translatable="false">d7gjhhllx1</string>
+</resources>
