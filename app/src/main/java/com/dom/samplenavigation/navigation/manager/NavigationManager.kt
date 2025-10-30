@@ -40,6 +40,10 @@ class NavigationManager(
     private val _shouldPlayVoice = MutableLiveData<Boolean>()
     val shouldPlayVoice: LiveData<Boolean> = _shouldPlayVoice
     
+    // 안내 시작 알림 트리거용 LiveData
+    private val _shouldPlayNavigationStart = MutableLiveData<Boolean>()
+    val shouldPlayNavigationStart: LiveData<Boolean> = _shouldPlayNavigationStart
+    
     private val _permissionRequired = MutableLiveData<Boolean>()
     val permissionRequired: LiveData<Boolean> = _permissionRequired
     
@@ -98,6 +102,7 @@ class NavigationManager(
         currentRoute = route
         isNavigating = true
         currentInstructionIndex = 0
+        lastAnnouncedDistance = -1  // 초기화
         
         _navigationState.value = NavigationState(
             isNavigating = true,
@@ -109,6 +114,10 @@ class NavigationManager(
         
         // 첫 번째 안내 메시지 설정
         updateCurrentInstruction()
+        
+        // 🔊 안내 시작 알림 트리거 ("경로 안내를 시작합니다" + 첫 안내)
+        _shouldPlayNavigationStart.value = true
+        Timber.d("🔊 Navigation start announcement triggered")
         
         Timber.d("🚀 Navigation started with ${route.instructions.size} instructions")
     }
@@ -337,10 +346,22 @@ class NavigationManager(
     private fun updateCurrentInstruction() {
         val route = currentRoute ?: return
         val instruction = route.instructions.getOrNull(currentInstructionIndex)
-        _currentInstruction.value = instruction
         
         if (instruction != null) {
-            Timber.d("📢 Instruction: ${instruction.message} (${instruction.distance}m)")
+            // 현재 위치에서 안내 지점까지의 거리 계산
+            val distance = if (currentLocation != null) {
+                calculateDistance(currentLocation!!, instruction.location).toInt()
+            } else {
+                instruction.distance
+            }
+            
+            // 거리 정보를 포함한 instruction 생성
+            val updatedInstruction = instruction.copy(distanceToInstruction = distance)
+            _currentInstruction.value = updatedInstruction
+            
+            Timber.d("📢 Instruction updated: ${instruction.message} (distance: ${distance}m)")
+        } else {
+            _currentInstruction.value = instruction
         }
     }
     

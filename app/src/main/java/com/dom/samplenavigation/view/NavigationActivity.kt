@@ -174,7 +174,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             }
 
             // 제스처 모드가 아닐 때만 자동 추적 실행
-            if (!isGestureMode) {
+                            if (!isGestureMode) {
                 // 현재 위치가 있으면 경로와 통합하여 처리
                 if (state.isNavigating && isNavigating) {
                     state.currentLocation?.let { currentLocation ->
@@ -184,7 +184,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                                 val nearestPoint = findClosestPathPointAhead(currentLocation, route.path, currentPathIndex)
                                 val distanceToPath = calculateDistance(currentLocation, route.path[nearestPoint])
                                 
-                                Timber.d("📍 Current location: $currentLocation")
+                                Timber.d("📍 GPS Location: $currentLocation")
                                 Timber.d("📍 Nearest path point index: $nearestPoint (current: $currentPathIndex), distance: ${distanceToPath}m")
                                 
                                 // 2. 경로 이탈 확인 - 70m 이상이면 재검색
@@ -192,52 +192,55 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                                     val currentTime = System.currentTimeMillis()
                                     // 최소 5초 간격으로 재검색 제한 (너무 자주 재검색 방지)
                                     if (currentTime - lastRerouteTime > 5000) {
-                                        Timber.d("🔄 Initiating reroute... Distance to path: ${distanceToPath}m")
+                                        Timber.d("🔄 Off-route detected! Distance: ${distanceToPath}m - Initiating reroute...")
                                         requestReroute(currentLocation)
                                         lastRerouteTime = currentTime
+                                        
+                                        // 경로 이탈 시에는 실제 GPS 위치에 마커 표시
+                                        updateCurrentLocationMarker(currentLocation)
+                                        followRoute(currentLocation)
                                     } else {
-                                        Timber.d("⏳ Reroute request skipped (too soon from last reroute)")
+                                        Timber.d("⏳ Reroute request skipped (cooldown)")
                                     }
-                                } else if (distanceToPath < REROUTE_THRESHOLD) {
-                                    // 3. 70m 이내면 경로 위에 스냅 (snap-to-road)
+                                } else {
+                                    // 3. 70m 이내면 항상 경로 위에 스냅 (팩맨처럼!)
                                     // 재검색 플래그 해제 (경로 복귀)
                                     if (isRerouting) {
                                         isRerouting = false
-                                        Timber.d("✅ Returned to route, reroute flag cleared")
+                                        Timber.d("✅ Returned to route")
                                     }
                                     
-                                    // 지나온 경로까지의 인덱스 업데이트 (진행 방향 고려)
+                                    // 진행 방향 고려하여 인덱스 업데이트
                                     if (nearestPoint >= currentPathIndex) {
                                         val oldIndex = currentPathIndex
                                         currentPathIndex = nearestPoint
                                         
                                         if (currentPathIndex > oldIndex) {
-                                            Timber.d("📍 Path index updated: $oldIndex -> $currentPathIndex")
-                                            // 지나온 경로 숨기기 (UI 업데이트)
+                                            Timber.d("📍 Path index progressed: $oldIndex -> $currentPathIndex")
+                                            // 지나온 경로 숨기기
                                             updatePassedRoute(route.path, currentPathIndex)
                                         }
                                     }
                                     
-                                    // 4. 경로상의 위치를 마커 위치로 사용 (Snap-to-road)
+                                    // 4. 🎮 팩맨 모드: 마커는 항상 경로 위에! (Snap-to-road)
                                     val pathLocation = route.path[currentPathIndex]
                                     updateCurrentLocationMarker(pathLocation)
+                                    Timber.d("🎮 Marker snapped to path: $pathLocation (distance from GPS: ${distanceToPath}m)")
                                     
-                                    // 5. 진행 방향 계산 및 지도 회전
-                                    // 한 스텝 이전 경로의 방향 사용 (실제 회전 후 지도 회전)
+                                    // 5. 진행 방향 계산 및 지도 회전 (한 스텝 이전 경로의 방향 사용)
                                     val bearingIndex = if (currentPathIndex > 0) currentPathIndex - 1 else currentPathIndex
                                     val bearing = calculateBearingFromPath(route.path, bearingIndex)
                                     if (bearing >= 0) {
-                                        followRouteWithBearing(currentLocation, bearing)
+                                        followRouteWithBearing(pathLocation, bearing)
                                         updateCurrentLocationMarkerDirection(bearing)
                                     } else {
-                                        followRoute(currentLocation)
+                                        followRoute(pathLocation)
                                     }
                                     
                                     // 6. 도착지 근처 도착 확인 (25미터)
                                     val distanceToDestination = calculateDistance(pathLocation, route.summary.endLocation)
                                     if (distanceToDestination <= ARRIVAL_THRESHOLD) {
                                         Timber.d("✅ Arrived at destination! (${distanceToDestination}m)")
-                                        // 자동 안내 종료
                                         navigationManager.stopNavigation()
                                         Toast.makeText(this, "목적지에 도착했습니다!", Toast.LENGTH_SHORT).show()
                                     }
@@ -277,6 +280,18 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     if (voiceGuideManager.isReady()) {
                         voiceGuideManager.speakInstruction(instruction)
                         Timber.d("🔊 Voice instruction spoken: ${instruction.message}")
+                    }
+                }
+            }
+        }
+        
+        // 안내 시작 알림 관찰 ("경로 안내를 시작합니다" + 첫 안내)
+        navigationManager.shouldPlayNavigationStart.observe(this) { shouldPlay ->
+            if (shouldPlay == true) {
+                navigationManager.currentInstruction.value?.let { instruction ->
+                    if (voiceGuideManager.isReady()) {
+                        voiceGuideManager.speakNavigationStart(instruction)
+                        Timber.d("🔊 Navigation start announcement: 경로 안내를 시작합니다 + ${instruction.message}")
                     }
                 }
             }
@@ -675,12 +690,17 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private fun updateCurrentLocation(latLng: LatLng) {
         // NavigationManager에 현재 위치 업데이트
         navigationManager.updateCurrentLocation(latLng)
-        // 현재 위치 마커 업데이트
-        updateCurrentLocationMarker(latLng)
         
-        // 네비게이션 중이고 제스처 모드가 아닐 때만 자동 추적
-        if (navigationManager.navigationState.value?.isNavigating == true && !isGestureMode) {
-            followRoute(latLng)
+        // 마커 업데이트는 setupObservers에서 처리 (팩맨 모드)
+        // 여기서는 마커를 업데이트하지 않음!
+        
+        // 네비게이션 중이고 제스처 모드가 아닐 때는 setupObservers에서 처리
+        // 네비게이션 중이 아니거나 제스처 모드일 때만 여기서 처리
+        if (navigationManager.navigationState.value?.isNavigating != true || isGestureMode) {
+            updateCurrentLocationMarker(latLng)
+            if (!isGestureMode) {
+                followRoute(latLng)
+            }
         }
     }
 
@@ -951,15 +971,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             }
         }
 
-        // 위치가 들어오면 마커와 카메라를 즉시 갱신 (제스처 모드가 아닐 때만 자동 추적)
-        if (state.isNavigating && !isGestureMode) {
-            state.currentLocation?.let { loc ->
-                updateCurrentLocationMarker(loc)
-                followRoute(loc)
-            } ?: run {
-                Timber.w("📍 Current Location is null in state during navigation - waiting for next update")
-            }
-        }
+        // 마커와 카메라 업데이트는 setupObservers에서 처리 (팩맨 모드)
+        // 여기서는 UI 정보만 업데이트
     }
 
     private fun updateInstructionUI(instruction: Instruction) {
