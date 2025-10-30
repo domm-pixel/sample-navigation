@@ -1,6 +1,7 @@
 package com.dom.samplenavigation.view
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -20,6 +21,8 @@ import com.dom.samplenavigation.base.BaseActivity
 import com.dom.samplenavigation.databinding.ActivityMainBinding
 import com.dom.samplenavigation.navigation.model.NavigationRoute
 import com.dom.samplenavigation.view.viewmodel.MainViewModel
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.naver.maps.geometry.LatLng
 import com.naver.maps.geometry.LatLngBounds
 import com.naver.maps.map.CameraUpdate
@@ -27,6 +30,7 @@ import com.naver.maps.map.MapFragment
 import com.naver.maps.map.NaverMap
 import com.naver.maps.map.OnMapReadyCallback
 import com.naver.maps.map.overlay.Marker
+import com.naver.maps.map.overlay.OverlayImage
 import com.naver.maps.map.overlay.PathOverlay
 import dagger.hilt.android.AndroidEntryPoint
 import timber.log.Timber
@@ -41,6 +45,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
     private lateinit var locationManager: LocationManager
     private var currentLocation: LatLng? = null
     private var pathOverlay: PathOverlay? = null
+    private var currentMaker: Marker? = null
     private var startMarker: Marker? = null
     private var endMarker: Marker? = null
     private var currentRoute: NavigationRoute? = null
@@ -321,8 +326,9 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
     }
     
     /**
-     * 현재 위치 가져오기
+     * 현재 위치 가져오기 (FusedLocationProvider 사용 - 더 정확하고 빠름)
      */
+    @SuppressLint("MissingPermission")
     private fun getCurrentLocation() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
             != PackageManager.PERMISSION_GRANTED) {
@@ -335,9 +341,70 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         }
         
         try {
+            val fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+            
+            // 1) 최신 위치 시도 (getCurrentLocation - 더 정확함)
+            fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+                .addOnSuccessListener { location ->
+                    if (location != null) {
+                        val latLng = LatLng(location.latitude, location.longitude)
+                        updateCurrentLocation(latLng)
+                        Timber.d("📍 Current location obtained: $latLng (getCurrentLocation)")
+                        return@addOnSuccessListener
+                    }
+                    
+                    // 2) getCurrentLocation 실패 시 lastLocation 폴백
+                    fusedLocationClient.lastLocation.addOnSuccessListener { lastLocation ->
+                        if (lastLocation != null) {
+                            val latLng = LatLng(lastLocation.latitude, lastLocation.longitude)
+                            updateCurrentLocation(latLng)
+                            Timber.d("📍 Current location obtained: $latLng (lastLocation fallback)")
+                        } else {
+                            // 3) lastLocation도 없으면 기존 LocationManager 방식 사용
+                            Timber.w("📍 FusedLocationProvider failed, using LocationManager fallback")
+                            fallbackToLocationManager()
+                        }
+                    }.addOnFailureListener { e ->
+                        Timber.e("📍 lastLocation failed: ${e.message}, using LocationManager fallback")
+                        fallbackToLocationManager()
+                    }
+                }
+                .addOnFailureListener { e ->
+                    Timber.e("📍 getCurrentLocation failed: ${e.message}, trying lastLocation")
+                    // getCurrentLocation 실패 시 lastLocation 시도
+                    fusedLocationClient.lastLocation.addOnSuccessListener { lastLocation ->
+                        if (lastLocation != null) {
+                            val latLng = LatLng(lastLocation.latitude, lastLocation.longitude)
+                            updateCurrentLocation(latLng)
+                            Timber.d("📍 Current location obtained: $latLng (lastLocation after getCurrentLocation failed)")
+                        } else {
+                            Timber.w("📍 All FusedLocationProvider methods failed, using LocationManager fallback")
+                            fallbackToLocationManager()
+                        }
+                    }.addOnFailureListener { lastLocError ->
+                        Timber.e("📍 All location methods failed: ${lastLocError.message}")
+                        fallbackToLocationManager()
+                    }
+                }
+        } catch (e: SecurityException) {
+            Timber.e("📍 Location permission not granted: ${e.message}")
+        } catch (e: Exception) {
+            Timber.e("📍 Unexpected error getting location: ${e.message}")
+            fallbackToLocationManager()
+        }
+    }
+    
+    /**
+     * LocationManager 폴백 (FusedLocationProvider 실패 시)
+     */
+    @SuppressLint("MissingPermission")
+    private fun fallbackToLocationManager() {
+        try {
             val lastKnownLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
             if (lastKnownLocation != null) {
-                updateCurrentLocation(LatLng(lastKnownLocation.latitude, lastKnownLocation.longitude))
+                val latLng = LatLng(lastKnownLocation.latitude, lastKnownLocation.longitude)
+                updateCurrentLocation(latLng)
+                Timber.d("📍 Current location obtained: $latLng (LocationManager fallback)")
             } else {
                 // 실시간 위치 요청
                 locationManager.requestLocationUpdates(
@@ -346,9 +413,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     1f,
                     locationListener
                 )
+                Timber.d("📍 Requesting location updates from LocationManager")
             }
         } catch (e: SecurityException) {
-            Timber.e("Location permission not granted: ${e.message}")
+            Timber.e("📍 LocationManager fallback failed: ${e.message}")
         }
     }
     
@@ -377,6 +445,15 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         naverMap?.let { map ->
             map.moveCamera(CameraUpdate.scrollTo(latLng))
         }
+
+        // set marker for current location if needed
+        currentMaker?.map = null
+        currentMaker = Marker().apply {
+            position = latLng
+            icon = OverlayImage.fromResource(com.naver.maps.map.R.drawable.navermap_default_marker_icon_blue)
+            map = naverMap
+        }
+
         
         Timber.d("📍 Current location updated: $latLng")
     }
