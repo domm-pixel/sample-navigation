@@ -180,72 +180,66 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     state.currentLocation?.let { currentLocation ->
                         state.currentRoute?.let { route ->
                             if (isMapReady) {
-                                // 1. 경로에서 현재 위치 찾기 (오차 범위 10-15미터)
+                                // 1. 앞으로 진행할 경로에서 가장 가까운 지점 찾기
                                 val nearestPoint = findClosestPathPointAhead(currentLocation, route.path, currentPathIndex)
                                 val distanceToPath = calculateDistance(currentLocation, route.path[nearestPoint])
                                 
                                 Timber.d("📍 Current location: $currentLocation")
                                 Timber.d("📍 Nearest path point index: $nearestPoint (current: $currentPathIndex), distance: ${distanceToPath}m")
                                 
-                                // 오차 범위 내에 있으면 경로상 위치 업데이트
-                                if (distanceToPath <= OFF_ROUTE_THRESHOLD) {
+                                // 2. 경로 이탈 확인 - 70m 이상이면 재검색
+                                if (distanceToPath >= REROUTE_THRESHOLD && !isRerouting) {
+                                    val currentTime = System.currentTimeMillis()
+                                    // 최소 5초 간격으로 재검색 제한 (너무 자주 재검색 방지)
+                                    if (currentTime - lastRerouteTime > 5000) {
+                                        Timber.d("🔄 Initiating reroute... Distance to path: ${distanceToPath}m")
+                                        requestReroute(currentLocation)
+                                        lastRerouteTime = currentTime
+                                    } else {
+                                        Timber.d("⏳ Reroute request skipped (too soon from last reroute)")
+                                    }
+                                } else if (distanceToPath < REROUTE_THRESHOLD) {
+                                    // 3. 70m 이내면 경로 위에 스냅 (snap-to-road)
                                     // 재검색 플래그 해제 (경로 복귀)
                                     if (isRerouting) {
                                         isRerouting = false
                                         Timber.d("✅ Returned to route, reroute flag cleared")
                                     }
                                     
-                                    // 2. 지나온 경로까지의 인덱스 업데이트 (진행 방향 고려)
-                                    // nearestPoint가 현재 인덱스보다 앞에 있거나, 현재 인덱스와 가까우면 업데이트
+                                    // 지나온 경로까지의 인덱스 업데이트 (진행 방향 고려)
                                     if (nearestPoint >= currentPathIndex) {
                                         val oldIndex = currentPathIndex
                                         currentPathIndex = nearestPoint
                                         
                                         if (currentPathIndex > oldIndex) {
                                             Timber.d("📍 Path index updated: $oldIndex -> $currentPathIndex")
-                                            // 3. 지나온 경로 숨기기 (UI 업데이트)
+                                            // 지나온 경로 숨기기 (UI 업데이트)
                                             updatePassedRoute(route.path, currentPathIndex)
                                         }
                                     }
                                     
-                                    // 4. 경로상의 위치를 마커 위치로 사용
+                                    // 4. 경로상의 위치를 마커 위치로 사용 (Snap-to-road)
                                     val pathLocation = route.path[currentPathIndex]
                                     updateCurrentLocationMarker(pathLocation)
                                     
-                                    // 5. 진행 방향 계산 및 지도 회전 (경로 기반)
-                                    val bearing = calculateBearingFromPath(route.path, currentPathIndex)
+                                    // 5. 진행 방향 계산 및 지도 회전
+                                    // 한 스텝 이전 경로의 방향 사용 (실제 회전 후 지도 회전)
+                                    val bearingIndex = if (currentPathIndex > 0) currentPathIndex - 1 else currentPathIndex
+                                    val bearing = calculateBearingFromPath(route.path, bearingIndex)
                                     if (bearing >= 0) {
-                                        followRouteWithPath(pathLocation, bearing)
+                                        followRouteWithBearing(currentLocation, bearing)
                                         updateCurrentLocationMarkerDirection(bearing)
+                                    } else {
+                                        followRoute(currentLocation)
                                     }
                                     
-                                    // 6. 도착지 근처 도착 확인 (20-30미터)
+                                    // 6. 도착지 근처 도착 확인 (25미터)
                                     val distanceToDestination = calculateDistance(pathLocation, route.summary.endLocation)
                                     if (distanceToDestination <= ARRIVAL_THRESHOLD) {
                                         Timber.d("✅ Arrived at destination! (${distanceToDestination}m)")
                                         // 자동 안내 종료
                                         navigationManager.stopNavigation()
                                         Toast.makeText(this, "목적지에 도착했습니다!", Toast.LENGTH_SHORT).show()
-                                    }
-                                } else {
-                                    // 경로 이탈 판정
-                                    Timber.w("⚠️ Off route! Distance: ${distanceToPath}m (threshold: ${OFF_ROUTE_THRESHOLD}m)")
-                                    
-                                    // 재검색 필요 여부 확인
-                                    if (distanceToPath >= REROUTE_THRESHOLD && !isRerouting) {
-                                        val currentTime = System.currentTimeMillis()
-                                        // 최소 5초 간격으로 재검색 제한 (너무 자주 재검색 방지)
-                                        if (currentTime - lastRerouteTime > 5000) {
-                                            Timber.d("🔄 Initiating reroute... Distance to path: ${distanceToPath}m")
-                                            requestReroute(currentLocation)
-                                            lastRerouteTime = currentTime
-                                        } else {
-                                            Timber.d("⏳ Reroute request skipped (too soon from last reroute)")
-                                        }
-                                    } else {
-                                        // 재검색 임계값 미만이면 원본 위치 사용
-                                        updateCurrentLocationMarker(currentLocation)
-                                        followRoute(currentLocation)
                                     }
                                 }
                             }
@@ -644,11 +638,22 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     /**
      * 위치 리스너
      */
+    private var lastLocation: Location? = null
+    
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             val latLng = LatLng(location.latitude, location.longitude)
+            
+            // GPS bearing을 사용하여 방향 업데이트 (실제 이동 방향 반영)
+            if (location.hasBearing() && location.hasSpeed() && location.speed > 1.0f) {
+                // 속도가 1m/s 이상일 때만 GPS bearing 사용 (정지 시 방향 변경 방지)
+                lastBearing = location.bearing
+                Timber.d("🧭 GPS bearing updated: ${location.bearing}° (speed: ${location.speed}m/s)")
+            }
+            
+            lastLocation = location
             updateCurrentLocation(latLng)
-            Timber.d("📍 Location updated: $latLng")
+            Timber.d("📍 Location updated: $latLng, bearing: ${location.bearing}°, speed: ${location.speed}m/s")
         }
         
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {
@@ -1087,120 +1092,101 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     }
     
     /**
-     * 지도를 경로에 맞게 자동 추적 (현재 위치를 중앙 하단에 배치, 3D 뷰)
-     * 예시 이미지처럼 현재 위치를 하단 중앙에 두고 앞쪽 경로를 보여주는 네비게이션 뷰
-     * 실제 이동 방향을 계산하여 회전 (경로 기반이 아닌 실제 위치 이동 기반)
+     * 지도를 경로에 맞게 자동 추적 (현재 위치를 중앙에 배치, 3D 뷰)
+     * GPS bearing을 사용하여 실제 이동 방향 반영
      */
     private fun followRoute(location: LatLng) {
         naverMap?.let { map ->
-            // 진행 방향 계산 - 실제 위치 이동 기반
-            var bearing = 0f
+            // GPS bearing 사용 (이미 locationListener에서 업데이트됨)
+            var bearing = lastBearing
             
-            // 이전 위치가 있으면 실제 이동 방향 계산
-            val previous = previousLocationForBearing
-            if (previous != null) {
-                val distance = calculateDistance(previous, location)
-                // 충분히 이동했을 때만 방향 계산 (노이즈 제거)
-                if (distance > 10f) { // 10미터 이상 이동해야 방향 계산 (더 엄격하게)
-                    val newBearing = calculateBearing(previous, location)
-                    // 회전이 급격하지 않도록 부드럽게 처리
-                    if (lastBearing > 0) {
-                        val diff = shortestAngleDiff(lastBearing, newBearing)
-                        // 변화량이 충분히 클 때만 회전 (5도 이상)
-                        if (Math.abs(diff) > 5f) {
-                            // 변화량을 제한하여 부드럽게 회전 (최대 15도씩만)
-                            val limitedDiff = if (Math.abs(diff) > 15f) {
-                                if (diff > 0) 15f else -15f
-                            } else {
-                                diff
-                            }
-                            // 더 부드러운 보간 (20%만 적용)
-                            bearing = normalizeBearing(lastBearing + limitedDiff * 0.2f)
-                        } else {
-                            // 변화량이 작으면 베어링 유지
-                            bearing = lastBearing
-                        }
-                    } else {
-                        // 첫 번째 계산이면 바로 사용
-                        bearing = newBearing
-                    }
-                    Timber.d("🧭 Bearing: $lastBearing° -> $newBearing° (diff: ${shortestAngleDiff(lastBearing, newBearing)}°) -> $bearing° (distance: ${distance}m)")
-                } else {
-                    // 이동 거리가 짧으면 이전 베어링 유지
-                    bearing = lastBearing
-                    Timber.d("🧭 Movement too small (${distance}m), keeping previous bearing: $bearing°")
-                }
-            } else {
-                // 이전 위치가 없으면 NavigationManager의 베어링 사용
-                bearing = navigationManager.getBearingToNextInstruction()
-                if (bearing <= 0) {
-                    // 베어링이 없으면 경로 기반으로 초기 방향 설정
-                    val route = navigationManager.navigationState.value?.currentRoute
-                    if (route != null && route.path.size >= 2) {
-                        bearing = calculateBearing(route.path[0], route.path[1])
-                        Timber.d("🧭 Using initial route bearing: $bearing°")
+            // bearing이 없으면 경로 기반으로 초기 방향 설정
+            if (bearing <= 0) {
+                val route = navigationManager.navigationState.value?.currentRoute
+                if (route != null && route.path.size >= 2) {
+                    // 현재 경로 인덱스 기반으로 방향 계산
+                    bearing = calculateBearingFromPath(route.path, currentPathIndex)
+                    if (bearing > 0) {
+                        lastBearing = bearing
+                        Timber.d("🧭 Using route bearing: $bearing°")
                     }
                 }
             }
             
-            // 이전 위치 저장 및 마지막 베어링 업데이트
-            previousLocationForBearing = location
+            // 네비게이션 뷰 설정
             if (bearing > 0) {
-                lastBearing = bearing
-            }
-            
-            // 네비게이션 뷰 설정 (베어링이 있으면 사용, 없으면 기본값으로 진행)
-            if (bearing > 0) {
-                // 현재 위치를 지도 중앙에 오도록 설정
-                val adjustedBearing = bearing
-                
                 // 네비게이션 모드의 줌과 방향 저장
                 lastNavigationZoom = 17.0
-                lastNavigationBearing = adjustedBearing
+                lastNavigationBearing = bearing
                 
                 // 현재 위치를 중심으로 한 카메라 설정
                 val cameraPosition = CameraPosition(
                     location,            // 카메라 타겟 (현재 위치를 중앙에)
-                    lastNavigationZoom,  // 줌 레벨 (상세하게 볼 수 있도록 줌 인)
+                    lastNavigationZoom,  // 줌 레벨
                     0.0,                 // 기울기
-                    adjustedBearing.toDouble() // 베어링 (진행 방향이 위쪽을 향함)
+                    bearing.toDouble()   // GPS bearing (실제 이동 방향)
                 )
                 
                 val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
-                    .animate(CameraAnimation.Easing, 200) // 빠른 회전 애니메이션
+                    .animate(CameraAnimation.Easing, 200)
                 map.moveCamera(cameraUpdate)
                 
-                Timber.d("🗺️ Navigation view: location=$location (center), bearing=$bearing°, zoom=$lastNavigationZoom")
+                Timber.d("🗺️ Navigation view: location=$location, GPS bearing=$bearing°, zoom=$lastNavigationZoom")
             } else {
-                // 베어링을 계산할 수 없을 때도 현재 위치를 중앙에 표시
-                val route = navigationManager.navigationState.value?.currentRoute
-                if (route != null && route.path.size >= 2) {
-                    // 경로의 첫 두 포인트를 사용하여 방향 계산 시도
-                    val firstBearing = calculateBearing(route.path[0], route.path[1])
-                    
-                    val cameraPosition = CameraPosition(
-                        location,            // 현재 위치를 중앙에
-                        17.0,
-                        0.0,
-                        firstBearing.toDouble()
-                    )
-                    val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
-                        .animate(CameraAnimation.Easing, 200) // 빠른 회전 애니메이션
-                    map.moveCamera(cameraUpdate)
-                    Timber.d("🗺️ Navigation view (using route start): location=$location (center), bearing=$firstBearing°")
-                } else {
-                    // 기본 뷰
-                    val cameraPosition = CameraPosition(
-                        location,            // 현재 위치를 중앙에
-                        17.0,
-                        0.0,
-                        0.0
-                    )
-                    val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
-                        .animate(CameraAnimation.Easing, 200) // 빠른 회전 애니메이션
-                    map.moveCamera(cameraUpdate)
-                    Timber.d("🗺️ Navigation view (default): location=$location (center), no bearing")
-                }
+                // 기본 뷰 (bearing 없을 때)
+                val cameraPosition = CameraPosition(
+                    location,
+                    17.0,
+                    0.0,
+                    0.0
+                )
+                val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
+                    .animate(CameraAnimation.Easing, 200)
+                map.moveCamera(cameraUpdate)
+                Timber.d("🗺️ Navigation view (default): location=$location, no bearing")
+            }
+        }
+    }
+    
+    /**
+     * 지정된 bearing으로 지도 회전 (한 스텝 이전 경로의 방향 사용)
+     */
+    private fun followRouteWithBearing(location: LatLng, bearing: Float) {
+        naverMap?.let { map ->
+            // 부드러운 회전을 위한 보간
+            val diff = if (lastBearing > 0) shortestAngleDiff(lastBearing, bearing) else 0f
+            
+            val smoothedBearing = if (Math.abs(diff) > 30f) {
+                // 급격한 변화는 제한 (최대 30도씩만)
+                normalizeBearing(lastBearing + if (diff > 0) 30f else -30f)
+            } else if (Math.abs(diff) > 1f) {
+                // 부드러운 보간 (60% 적용)
+                normalizeBearing(lastBearing + diff * 0.6f)
+            } else {
+                // 변화량이 작으면 이전 베어링 유지
+                lastBearing
+            }
+            
+            if (smoothedBearing > 0) {
+                lastBearing = smoothedBearing
+                
+                // 네비게이션 모드의 줌과 방향 저장
+                lastNavigationZoom = 17.0
+                lastNavigationBearing = smoothedBearing
+                
+                // 현재 위치를 중심으로 한 카메라 설정
+                val cameraPosition = CameraPosition(
+                    location,
+                    lastNavigationZoom,
+                    0.0,
+                    smoothedBearing.toDouble()
+                )
+                
+                val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
+                    .animate(CameraAnimation.Easing, 200)
+                map.moveCamera(cameraUpdate)
+                
+                Timber.d("🗺️ Navigation view (lagged bearing): location=$location, bearing=$smoothedBearing° (target=$bearing°)")
             }
         }
     }
