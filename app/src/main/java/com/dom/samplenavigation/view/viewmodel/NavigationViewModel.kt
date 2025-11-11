@@ -4,6 +4,8 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.dom.samplenavigation.api.navigation.repo.NavigationRepository
+import com.dom.samplenavigation.api.telemetry.model.VehicleLocationPayload
+import com.dom.samplenavigation.api.telemetry.repo.TelemetryRepository
 import com.dom.samplenavigation.base.BaseViewModel
 import com.dom.samplenavigation.navigation.mapper.NavigationMapper
 import com.dom.samplenavigation.navigation.model.NavigationRoute
@@ -15,7 +17,8 @@ import javax.inject.Inject
 
 @HiltViewModel
 class NavigationViewModel @Inject constructor(
-    private val navigationRepository: NavigationRepository
+    private val navigationRepository: NavigationRepository,
+    private val telemetryRepository: TelemetryRepository
 ) : BaseViewModel() {
 
     private val _navigationRoute = MutableLiveData<NavigationRoute?>()
@@ -129,6 +132,14 @@ class NavigationViewModel @Inject constructor(
             } finally {
                 _isLoading.value = false
             }
+        }
+    }
+
+    fun sendTelemetry(vehicleId: Int, payload: VehicleLocationPayload) {
+        viewModelScope.launch {
+            telemetryRepository.sendLocation(vehicleId, payload)
+                .onFailure { Timber.w("📡 Telemetry send failed: ${it.message}") }
+                .onSuccess { Timber.d("📡 Telemetry sent") }
         }
     }
 }

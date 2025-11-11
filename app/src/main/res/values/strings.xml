@@ -1,4 +1,9 @@
 <resources>
     <string name="app_name">SampleNavigation</string>
     <string name="naverMapClientId" translatable="false">d7gjhhllx1</string>
+
+    <string name="route_option_eta_format">예상 %1$s</string>
+    <string name="route_option_distance_format">거리 %1$skm</string>
+    <string name="route_option_toll_format">통행료 %1$s원</string>
+    <string name="route_option_toll_free">통행료 무료</string>
 </resources>

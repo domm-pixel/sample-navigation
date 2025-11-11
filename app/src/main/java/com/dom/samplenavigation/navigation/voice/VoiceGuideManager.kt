@@ -71,6 +71,16 @@ class VoiceGuideManager(
         tts?.speak(message + " 입니다", queueMode, null, "navigation_guide")
         Timber.d("🔊 Speaking: $message 입니다")
     }
+
+    /**
+     * 원문 그대로 음성 출력 (문장 후미 추가 없음)
+     */
+    fun speakPlain(message: String, queueMode: Int = TextToSpeech.QUEUE_FLUSH) {
+        if (!isInitialized || !isEnabled) return
+
+        tts?.speak(message, queueMode, null, "navigation_plain")
+        Timber.d("🔊 Speaking (plain): $message")
+    }
     
     /**
      * 안내 시작 알림 (순차 재생)

@@ -417,18 +417,19 @@ class NavigationManager(
     }
     
     /**
-     * 안정적인 베어링 계산 (이전 코드 활용)
+     * 안정적인 베어링 계산
      */
     fun calculateStableBearing(location: Location): Float {
         val accuracy = location.accuracy
         val prev = previousLocation
         val distance = prev?.distanceTo(location) ?: Float.NaN
         
-        Timber.d("🧭 베어링 계산 시작 - 정확도: ${accuracy}m, GPS베어링: ${location.bearing}도, speed=${location.speed}m/s")
+        Timber.d(" 베어링 계산 시작 - 정확도: ${accuracy}m, GPS베어링: ${location.bearing}도, speed=${location.speed}m/s")
         
         // 0) GPS 정확도가 너무 나쁘면 기존 베어링 유지
         if (accuracy.isFinite() && accuracy > ACCURACY_BAD_M) {
-            Timber.d("🧭 GPS 정확도 낮음 (${accuracy}m) → 베어링 유지: $currentBearing")
+            Timber.d(" GPS 정확도 낮음 (${accuracy}m) → 베어링 유지: $currentBearing")
+            previousLocation = location
             return currentBearing
         }
         
@@ -437,15 +438,17 @@ class NavigationManager(
         if (prev != null) {
             if (distance.isFinite() && distance >= MIN_MOVE_DISTANCE_M) {
                 candidate = prev.bearingTo(location)
-                Timber.d("🧭 이동 기반 실제 방향 사용: ${candidate}도 (distance=${distance}m)")
+                Timber.d(" 이동 기반 실제 방향 사용: ${candidate}도 (distance=${distance}m)")
             } else {
-                Timber.d("🧭 이동 거리 짧음 (< ${MIN_MOVE_DISTANCE_M}m) → 베어링 유지: $currentBearing")
+                Timber.d(" 이동 거리 짧음 (< ${MIN_MOVE_DISTANCE_M}m) → 베어링 유지: $currentBearing")
+                previousLocation = location
                 return currentBearing
             }
         } else {
             // 첫 샷: 이전 위치가 없으면 GPS bearing 사용(없으면 유지)
             if (!candidate.isFinite() || candidate == 0f) {
-                Timber.d("🧭 이전 위치 없음 & 유효한 GPS bearing 없음 → 베어링 유지: $currentBearing")
+                Timber.d(" 이전 위치 없음 & 유효한 GPS bearing 없음 → 베어링 유지: $currentBearing")
+                previousLocation = location
                 return currentBearing
             }
         }
@@ -453,7 +456,8 @@ class NavigationManager(
         // 2) 텔레포트/대이동 감지 시 현재 베어링을 즉시 재설정
         if (distance.isFinite() && distance >= TELEPORT_RESET_M) {
             currentBearing = normalizeBearingDeg(candidate)
-            Timber.d("🧭 텔레포트 감지 (distance=${distance}m ≥ ${TELEPORT_RESET_M}m) → 베어링 즉시 설정: $currentBearing")
+            Timber.d(" 텔레포트 감지 (distance=${distance}m ≥ ${TELEPORT_RESET_M}m) → 베어링 즉시 설정: $currentBearing")
+            previousLocation = location
             return currentBearing
         }
         
@@ -461,11 +465,12 @@ class NavigationManager(
         val diff = shortestAngleDiffDeg(currentBearing, candidate)
         
         // 4) 급격한 점프 억제: '완전 차단' 대신 점진 회전으로 한 스텝만 이동
-        if (kotlin.math.abs(diff) > MAX_BEARING_JUMP_DEG) {
-            val step = kotlin.math.min(kotlin.math.abs(diff), MAX_STEP_DEG)
+        if (abs(diff) > MAX_BEARING_JUMP_DEG) {
+            val step = min(abs(diff), MAX_STEP_DEG)
             val signedStep = if (diff >= 0f) step else -step
             currentBearing = normalizeBearingDeg(currentBearing + signedStep)
-            Timber.d("🧭 급격한 베어링 변화 감지 (${diff}도) → 점진 회전 적용(step=${signedStep}도) → $currentBearing")
+            Timber.d(" 급격한 베어링 변화 감지 (${diff}도) → 점진 회전 적용(step=${signedStep}도) → $currentBearing")
+            previousLocation = location
             return currentBearing
         }
         
@@ -473,7 +478,8 @@ class NavigationManager(
         val alpha = if (location.hasSpeed() && location.speed > SPEED_STATIONARY) EMA_ALPHA_FAST else EMA_ALPHA_SLOW
         val smoothed = normalizeBearingDeg(currentBearing + alpha * diff)
         currentBearing = smoothed
-        Timber.d("🧭 최종 베어링 업데이트: $currentBearing (target=$candidate, diff=$diff, alpha=$alpha)")
+        Timber.d(" 최종 베어링 업데이트: $currentBearing (target=$candidate, diff=$diff, alpha=$alpha)")
+        previousLocation = location
         return currentBearing
     }
     

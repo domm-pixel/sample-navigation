@@ -8,10 +8,12 @@ data class ResultPath(
 )
 
 data class Route(
-    val traoptimal: List<Traoptimal>?
+    val trafast: List<RouteOptionRaw>?,
+    val traoptimal: List<RouteOptionRaw>?,
+    val traavoidtoll: List<RouteOptionRaw>?
 )
 
-data class Traoptimal(
+data class RouteOptionRaw(
     val guide: List<Guide>?,
     val path: List<List<Double>>?,
     val section: List<Section>?,

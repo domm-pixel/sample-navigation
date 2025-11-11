@@ -11,5 +11,6 @@ interface NaverDirectionApi {
     suspend fun getPath(
         @Query("start") start: String, // 출발지 좌표 (예: 127.027610,37.497942)
         @Query("goal") goal: String, // 도착지 좌표 (예: 127.027610,37.497942)
+        @Query("option") option: String = "trafast:traoptimal:traavoidtoll", // 경로 옵션
     ): Response<ResultPath>
 }

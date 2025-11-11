@@ -12,6 +12,9 @@ class NavigationRepository @Inject constructor(
     private val naverDirectionApi: NaverDirectionApi,
     private val naverMapApi : NaverMapApi
 ) {
+    companion object {
+        private const val NAVER_ROUTE_OPTIONS = "trafast:traoptimal:traavoidtoll"
+    }
     // Fetches the navigation path between two addresses
     fun getPath(
         startAddress: String,
@@ -42,7 +45,7 @@ class NavigationRepository @Inject constructor(
                 val startCoordsString = "${startCoords.second},${startCoords.first}" // lng,lat 형식
                 val endCoordsString = "${endCoords.second},${endCoords.first}" // lng,lat 형식
 
-                val response = naverDirectionApi.getPath(startCoordsString, endCoordsString)
+                val response = naverDirectionApi.getPath(startCoordsString, endCoordsString, NAVER_ROUTE_OPTIONS)
                 if (response.isSuccessful) {
                     response.body()?.let {
                         emit(Result.success(it))
@@ -78,7 +81,7 @@ class NavigationRepository @Inject constructor(
                 val startCoordsString = "$startLng,$startLat" // lng,lat 형식
                 val endCoordsString = "${endCoords.second},${endCoords.first}" // lng,lat 형식
 
-                val response = naverDirectionApi.getPath(startCoordsString, endCoordsString)
+                val response = naverDirectionApi.getPath(startCoordsString, endCoordsString, NAVER_ROUTE_OPTIONS)
                 if (response.isSuccessful) {
                     response.body()?.let {
                         emit(Result.success(it))

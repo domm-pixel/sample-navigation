@@ -1,8 +1,11 @@
 package com.dom.samplenavigation.navigation.mapper
 
 import com.dom.samplenavigation.api.navigation.model.ResultPath
+import com.dom.samplenavigation.api.navigation.model.RouteOptionRaw
 import com.dom.samplenavigation.navigation.model.Instruction
 import com.dom.samplenavigation.navigation.model.NavigationRoute
+import com.dom.samplenavigation.navigation.model.NavigationOptionRoute
+import com.dom.samplenavigation.navigation.model.RouteOptionType
 import com.dom.samplenavigation.navigation.model.RouteSection
 import com.dom.samplenavigation.navigation.model.RouteSummary
 import com.naver.maps.geometry.LatLng
@@ -11,33 +14,57 @@ import com.naver.maps.geometry.LatLng
  * API 응답을 앱에서 사용할 모델로 변환하는 매퍼
  */
 object NavigationMapper {
-    
+
     fun mapToNavigationRoute(resultPath: ResultPath): NavigationRoute? {
-        // API 응답이 성공인지 확인
-        if (resultPath.code != 0) {
-            return null
+        val routes = mapToNavigationOptionRoutes(resultPath)
+        return routes.firstOrNull { it.optionType == RouteOptionType.TRAOPTIMAL }?.route
+            ?: routes.firstOrNull()?.route
+    }
+
+    fun mapToNavigationOptionRoutes(resultPath: ResultPath): List<NavigationOptionRoute> {
+        if (resultPath.code != 0) return emptyList()
+
+        val routeRoot = resultPath.route ?: return emptyList()
+        val options = mutableListOf<NavigationOptionRoute>()
+
+        routeRoot.trafast?.firstOrNull()?.let { option ->
+            mapRouteOption(option)?.let {
+                options += NavigationOptionRoute(RouteOptionType.TRAFAST, it)
+            }
         }
-        
-        val route = resultPath.route?.traoptimal?.firstOrNull() ?: return null
-        
-        // 경로 좌표 변환
+        routeRoot.traoptimal?.firstOrNull()?.let { option ->
+            mapRouteOption(option)?.let {
+                options += NavigationOptionRoute(RouteOptionType.TRAOPTIMAL, it)
+            }
+        }
+        routeRoot.traavoidtoll?.firstOrNull()?.let { option ->
+            mapRouteOption(option)?.let {
+                options += NavigationOptionRoute(RouteOptionType.TRAAVOIDTOLL, it)
+            }
+        }
+
+        return options
+    }
+
+    private fun mapRouteOption(route: RouteOptionRaw): NavigationRoute? {
         val path = route.path?.map { coordinates ->
             if (coordinates.size >= 2) {
-                LatLng(coordinates[1], coordinates[0]) // [lng, lat] -> LatLng(lat, lng)
+                LatLng(coordinates[1], coordinates[0])
             } else {
                 LatLng(0.0, 0.0)
             }
         } ?: emptyList()
-        
-        // 안내 메시지 변환
+
+        if (path.isEmpty()) return null
+
         val instructions = route.guide?.map { guide ->
             val pointIndex = guide.pointIndex ?: 0
-            val location = if (pointIndex < path.size) {
+            val location = if (pointIndex in path.indices) {
                 path[pointIndex]
             } else {
                 path.lastOrNull() ?: LatLng(0.0, 0.0)
             }
-            
+
             Instruction(
                 distance = guide.distance ?: 0,
                 duration = guide.duration ?: 0,
@@ -47,8 +74,7 @@ object NavigationMapper {
                 location = location
             )
         } ?: emptyList()
-        
-        // 구간 정보 변환
+
         val sections = route.section?.map { section ->
             RouteSection(
                 name = section.name ?: "",
@@ -59,25 +85,24 @@ object NavigationMapper {
                 pointCount = section.pointCount ?: 0
             )
         } ?: emptyList()
-        
-        // 요약 정보 변환
+
         val summary = route.summary?.let { s ->
             val startLocation = s.start?.location?.let { loc ->
                 if (loc.size >= 2) {
-                    LatLng(loc[1], loc[0]) // [lng, lat] -> LatLng(lat, lng)
+                    LatLng(loc[1], loc[0])
                 } else {
                     LatLng(0.0, 0.0)
                 }
             } ?: LatLng(0.0, 0.0)
-            
+
             val endLocation = s.goal?.location?.let { loc ->
                 if (loc.size >= 2) {
-                    LatLng(loc[1], loc[0]) // [lng, lat] -> LatLng(lat, lng)
+                    LatLng(loc[1], loc[0])
                 } else {
                     LatLng(0.0, 0.0)
                 }
             } ?: LatLng(0.0, 0.0)
-            
+
             RouteSummary(
                 totalDistance = s.distance ?: 0,
                 totalDuration = s.duration ?: 0,
@@ -88,7 +113,7 @@ object NavigationMapper {
                 tollFare = s.tollFare ?: 0
             )
         } ?: return null
-        
+
         return NavigationRoute(
             path = path,
             instructions = instructions,

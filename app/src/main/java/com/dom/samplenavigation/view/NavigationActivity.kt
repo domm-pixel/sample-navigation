@@ -21,6 +21,7 @@ import androidx.lifecycle.lifecycleScope
 import com.dom.samplenavigation.R
 import com.dom.samplenavigation.base.BaseActivity
 import com.dom.samplenavigation.databinding.ActivityNavigationBinding
+import com.dom.samplenavigation.api.telemetry.model.VehicleLocationPayload
 import com.dom.samplenavigation.navigation.manager.NavigationManager
 import com.dom.samplenavigation.navigation.model.Instruction
 import com.dom.samplenavigation.navigation.model.NavigationRoute
@@ -28,6 +29,11 @@ import com.dom.samplenavigation.navigation.model.NavigationState
 import com.dom.samplenavigation.navigation.voice.VoiceGuideManager
 import com.dom.samplenavigation.view.viewmodel.NavigationViewModel
 import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.naver.maps.geometry.LatLng
 import com.naver.maps.geometry.LatLngBounds
 import com.naver.maps.map.CameraAnimation
@@ -43,15 +49,14 @@ import com.naver.maps.map.overlay.OverlayImage
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.Priority
-import com.google.android.gms.location.LocationCallback
-import com.google.android.gms.location.LocationResult
 
 @AndroidEntryPoint
 class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
@@ -80,6 +85,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var lastGestureTime: Long = 0  // 마지막 제스처 시간
     private var lastNavigationZoom: Double = 17.0  // 네비게이션 모드의 줌 레벨
     private var lastNavigationBearing: Float = 0f  // 네비게이션 모드의 방향
+    private var lastNavigationTilt: Double = 0.0   // 네비게이션 모드의 기울기
     private var lastKnownLocation: LatLng? = null  // 마지막 알려진 위치 (GPS 끊김 대비)
     private var lastLocationUpdateTime: Long = 0  // 마지막 위치 업데이트 시간
     private var isInTunnel: Boolean = false  // 터널/지하차도 모드 여부
@@ -90,6 +96,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var lastInstructionCleanMessage: String? = null
     private var lastInstructionTargetIndex: Int? = null
     private var offRouteConfirmCount: Int = 0
+    private var lastStoppedElapsedMs: Long = 0L
+    private var pendingRerouteLocation: LatLng? = null
+    private var lastSpeedMps: Float = 0f
+    private var cameraSpeedInitialized: Boolean = false
+    private var lastTelemetrySentElapsed: Long = 0L
+    private val telemetryDateFormat = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault())
+    private val vehicleId: Int = 1 // TODO replace with runtime vehicle identifier
 
     // Fused Location
     private lateinit var fusedClient: FusedLocationProviderClient
@@ -112,8 +125,20 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         private const val SPEED_EMA_ALPHA = 0.25f                 // 속도 EMA 가중치
         private const val TOAST_COOLDOWN_MS = 5_000L              // 토스트 중복 방지
         private const val REROUTE_COOLDOWN_MS = 7_000L            // 재검색 쿨다운 강화
-        private const val OFF_ROUTE_MIN_ACCURACY = 50f            // 오프루트 판정에 요구되는 최대 정확도(m)
-        private const val OFF_ROUTE_CONFIRM_COUNT = 3             // 연속 N회 확인 후 재검색
+        private const val OFF_ROUTE_MIN_ACCURACY = 80f            // 오프루트 판정에 요구되는 최대 정확도(m)
+        private const val OFF_ROUTE_CONFIRM_COUNT = 2             // 연속 N회 확인 후 재검색
+        private const val STOP_RESUME_GRACE_MS = 4_000L           // 정차 후 재가속 시 유예 시간
+        private const val SPEED_EMA_ALPHA_CAMERA = 0.2f           // 카메라 줌용 속도 EMA
+        private const val ZOOM_LOW_SPEED = 18.0
+        private const val ZOOM_DEFAULT = 17.0
+        private const val ZOOM_HIGH_SPEED = 16.0
+        private const val SPEED_THRESHOLD_SLOW = 4.2f     // ≈15km/h
+        private const val SPEED_THRESHOLD_FAST = 13.9f    // ≈50km/h
+        private const val HIGH_SPEED_TILT = 35.0
+        private const val DEFAULT_TILT = 0.0
+        private const val CAMERA_ZOOM_EPS = 0.05
+        private const val CAMERA_TILT_EPS = 1.0
+        private const val TELEMETRY_INTERVAL_MS = 1_000L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -173,6 +198,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         naverMap.uiSettings.isLocationButtonEnabled = false
         naverMap.uiSettings.isZoomControlEnabled = false
         naverMap.buildingHeight = 0.2f
+
+        // 운전자 시야 확보를 위해 지도 중심을 화면 하단 쪽으로 오프셋
+        val density = resources.displayMetrics.density
+        val topPaddingPx = (600 * density).toInt()
+        val bottomPaddingPx = (0 * density).toInt()
+        naverMap.setContentPadding(0, topPaddingPx, 0, bottomPaddingPx)
+        Timber.d("🗺️ Map content padding set - top: $topPaddingPx, bottom: $bottomPaddingPx")
 
         // 지도 제스처 리스너 설정
         naverMap.setOnMapClickListener { _, _ ->
@@ -246,16 +278,19 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                                         val acc = lastLocation?.accuracy ?: 0f
                                         val spd = lastLocation?.speed ?: 0f
                                         val accuracyOk = acc in 0f..OFF_ROUTE_MIN_ACCURACY
-                                        val speedOk = spd > 0.5f
+                                        val speedOk = spd > 0.3f
                                         val tunnelOk = !isInTunnel
+                                        val nowMono = SystemClock.elapsedRealtime()
+                                        val timeSinceStop = nowMono - lastStoppedElapsedMs
+                                        val resumeOk = timeSinceStop > STOP_RESUME_GRACE_MS
 
-                                        if (accuracyOk && speedOk && tunnelOk) {
+                                        if (accuracyOk && speedOk && tunnelOk && resumeOk) {
                                             offRouteConfirmCount += 1
-                                            Timber.d("🔎 Off-route candidate: d=${distanceToPath}m, acc=${acc}m, spd=${spd}m/s, hit=${offRouteConfirmCount}")
+                                            Timber.d("🔎 Off-route candidate: d=${distanceToPath}m, acc=${acc}m, spd=${spd}m/s, hit=${offRouteConfirmCount}, Δstop=${timeSinceStop}ms")
                                         } else {
                                             // 조건 불충족 시 카운터 리셋
                                             offRouteConfirmCount = 0
-                                            Timber.d("⏸️ Off-route suppressed: accOk=$accuracyOk, speedOk=$speedOk, tunnelOk=$tunnelOk")
+                                            Timber.d("⏸️ Off-route suppressed: accOk=$accuracyOk, speedOk=$speedOk, tunnelOk=$tunnelOk, resumeOk=$resumeOk (Δstop=${timeSinceStop}ms)")
                                         }
 
                                         // 연속 N회 확정 + 쿨다운 체크 후 재검색 실행
@@ -264,12 +299,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                                             val currentTime = System.currentTimeMillis()
                                             if (currentTime - lastRerouteTime > REROUTE_COOLDOWN_MS) {
                                                 Timber.d("🔄 Off-route confirmed! Distance: ${distanceToPath}m - Initiating reroute...")
-                                                requestReroute(currentLocation)
+                                                val rerouteFrom = lastKnownLocation ?: currentLocation
+                                                requestReroute(rerouteFrom)
                                                 lastRerouteTime = currentTime
 
                                                 // 경로 이탈 시에는 실제 GPS 위치에 마커 표시
-                                                updateCurrentLocationMarker(currentLocation)
-                                                followRoute(currentLocation)
+                                                updateCurrentLocationMarker(rerouteFrom)
+                                                followRoute(rerouteFrom)
                                             } else {
                                                 Timber.d("⏳ Reroute request skipped (cooldown)")
                                             }
@@ -403,25 +439,49 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         // 경로 데이터 관찰
         navigationViewModel.navigationRoute.observe(this) { route ->
-            route?.let {
-                displayRoute(it)
+            route?.let { newRoute ->
+                displayRoute(newRoute)
 
-                // 재검색인 경우
-                if (isRerouting) {
-                    // 재검색 완료 처리
+                val wasRerouting = isRerouting
+                val anchorLocation = pendingRerouteLocation
+                    ?: navigationManager.navigationState.value?.currentLocation
+                    ?: lastKnownLocation
+
+                if (wasRerouting) {
                     isRerouting = false
-                    currentPathIndex = 0  // 새로운 경로이므로 인덱스 초기화
                     Toast.makeText(this, "경로를 재검색했습니다", Toast.LENGTH_SHORT).show()
                     Timber.d("✅ Reroute completed, new route displayed")
+
+                    val referenceLocation = anchorLocation ?: newRoute.summary.startLocation
+                    currentPathIndex = findClosestPathPointAhead(referenceLocation, newRoute.path, 0)
+                    val snappedLocation = newRoute.path.getOrElse(currentPathIndex) { newRoute.summary.startLocation }
+                    updateCurrentLocationMarker(snappedLocation)
+                    val bearing = calculateBearingFromPath(newRoute.path, currentPathIndex)
+                    if (bearing > 0) followRouteWithBearing(snappedLocation, bearing) else followRoute(snappedLocation)
                 }
 
-                navigationManager.startNavigation(it)
+                // 속도 기반 카메라 상태 초기화
+                cameraSpeedInitialized = false
+                lastSpeedMps = 0f
 
-                // 네비게이션 시작 시 마커를 출발지로 초기 설정
-                if (isMapReady && currentLocationMarker != null) {
-                    // 출발지로 마커 위치 설정
-                    updateCurrentLocationMarker(route.summary.startLocation)
-                    Timber.d("📍 Marker initialized to start location: ${route.summary.startLocation}")
+                navigationManager.startNavigation(newRoute)
+
+                if (wasRerouting) {
+                    anchorLocation?.let { navigationManager.updateCurrentLocation(it) }
+                    navigationManager.currentInstruction.value?.let { inst ->
+                        updateInstructionUI(inst)
+                        refreshInstructionDistance()
+                        if (voiceGuideManager.isReady()) {
+                            voiceGuideManager.speakInstruction(inst)
+                        }
+                    }
+                    pendingRerouteLocation = null
+                }
+
+                // 최초 시작 시에만 출발지로 마커 초기화 (재탐색 시엔 현재 위치 유지)
+                if (!wasRerouting && isMapReady && currentLocationMarker != null) {
+                    updateCurrentLocationMarker(newRoute.summary.startLocation)
+                    Timber.d("📍 Marker initialized to start location: ${newRoute.summary.startLocation}")
                 }
 
                 // 네비게이션 시작 시 즉시 3D 뷰로 전환
@@ -491,6 +551,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         isGestureMode = false
         navigationManager.stopNavigation()
         navigationViewModel.stopNavigation()
+        cameraSpeedInitialized = false
+        lastSpeedMps = 0f
 
         // 액티비티 종료
         finish()
@@ -589,7 +651,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             val cameraPosition = CameraPosition(
                 currentLocation,
                 lastNavigationZoom,
-                0.0,
+                lastNavigationTilt,
                 bearing.toDouble()
             )
 
@@ -620,7 +682,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 val cameraPosition = CameraPosition(
                     startLocation,
                     lastNavigationZoom,
-                    0.0,
+                    lastNavigationTilt,
                     bearing.toDouble()
                 )
 
@@ -720,6 +782,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 fusedCallback = object : LocationCallback() {
                     override fun onLocationResult(result: LocationResult) {
                         val loc = result.lastLocation ?: return
+                        val nowMono = SystemClock.elapsedRealtime()
                         val latLng = LatLng(loc.latitude, loc.longitude)
 
                         // GPS 신호 복구 처리
@@ -732,12 +795,22 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                         lastKnownLocation = latLng
                         lastLocationUpdateTime = System.currentTimeMillis()
                         lastFixElapsedMs = SystemClock.elapsedRealtime()
+                        if (loc.speed <= 1.0f) {
+                            lastStoppedElapsedMs = nowMono
+                        }
+                        lastSpeedMps = smoothCameraSpeed(loc.speed)
 
-                        if (loc.hasBearing() && loc.hasSpeed() && loc.speed > 1.0f && loc.bearingAccuracyDegrees <= 90f) {
+                        val stableBearing = navigationManager.calculateStableBearing(loc)
+                        if (stableBearing > 0f) {
+                            lastBearing = stableBearing
+                            Timber.d("🧭 Stable bearing updated: ${stableBearing}° (speed: ${loc.speed}m/s)")
+                        } else if (loc.hasBearing() && loc.hasSpeed() && loc.speed > 1.0f && loc.bearingAccuracyDegrees <= 90f) {
                             lastBearing = loc.bearing
+                            Timber.d("🧭 Fallback GPS bearing used: ${loc.bearing}°")
                         }
                         lastLocation = loc
                         updateCurrentLocation(latLng)
+                        maybeSendTelemetry(loc)
                         Timber.d("📍 Fused location: $latLng, bearing=${loc.bearing}°, speed=${loc.speed}m/s acc=${loc.accuracy}m")
                     }
                 }
@@ -773,7 +846,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         Timber.d("📍 startLocationUpdates() called")
 
         try {
-            val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
 
             // GPS가 활성화되어 있는지 확인
             val isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
@@ -841,6 +914,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             try {
+                val nowMono = SystemClock.elapsedRealtime()
                 val latLng = LatLng(location.latitude, location.longitude)
 
                 // GPS 신호 복구 확인
@@ -854,16 +928,25 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 lastKnownLocation = latLng
                 lastLocationUpdateTime = System.currentTimeMillis()
                 lastFixElapsedMs = SystemClock.elapsedRealtime()
+                if (location.speed <= 1.0f) {
+                    lastStoppedElapsedMs = nowMono
+                }
 
                 // GPS bearing을 사용하여 방향 업데이트 (실제 이동 방향 반영)
-                if (location.hasBearing() && location.hasSpeed() && location.speed > 1.0f) {
+                val stableBearing = navigationManager.calculateStableBearing(location)
+                if (stableBearing > 0f) {
+                    lastBearing = stableBearing
+                    Timber.d("🧭 Stable bearing updated (legacy): ${stableBearing}° (speed: ${location.speed}m/s)")
+                } else if (location.hasBearing() && location.hasSpeed() && location.speed > 1.0f) {
                     // 속도가 1m/s 이상일 때만 GPS bearing 사용 (정지 시 방향 변경 방지)
                     lastBearing = location.bearing
-                    Timber.d("🧭 GPS bearing updated: ${location.bearing}° (speed: ${location.speed}m/s)")
+                    Timber.d("🧭 GPS bearing fallback: ${location.bearing}° (speed: ${location.speed}m/s)")
                 }
+                lastSpeedMps = smoothCameraSpeed(location.speed)
 
                 lastLocation = location
                 updateCurrentLocation(latLng)
+                maybeSendTelemetry(location)
                 Timber.d("📍 Location updated: $latLng, bearing: ${location.bearing}°, speed: ${location.speed}m/s")
             } catch (e: Exception) {
                 Timber.e("❌ Error in locationListener: ${e.message}")
@@ -924,7 +1007,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         val path = route.path
         if (path.isNullOrEmpty() || path.size == 1) return
         val safeStartIdx = currentPathIndex.coerceIn(0, path.size - 1)
-        val lastPos = lastKnownLocation ?: return
+        lastKnownLocation ?: return
 
         // 터널 모드 진입 (히스테리시스)
         if (!isInTunnel && timeSinceLastFix >= TUNNEL_ENTER_MS) {
@@ -1043,6 +1126,21 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         val ema = lastSpeedEma?.let { it + SPEED_EMA_ALPHA * (base - it) } ?: base
         lastSpeedEma = ema
         return ema
+    }
+
+    /** 카메라용 속도 EMA 계산 */
+    private fun smoothCameraSpeed(rawSpeed: Float): Float {
+        if (!rawSpeed.isFinite()) {
+            return lastSpeedMps
+        }
+        val clamped = rawSpeed.coerceIn(0f, SPEED_MAX_MPS)
+        lastSpeedMps = if (!cameraSpeedInitialized) {
+            cameraSpeedInitialized = true
+            clamped
+        } else {
+            lastSpeedMps + SPEED_EMA_ALPHA_CAMERA * (clamped - lastSpeedMps)
+        }
+        return lastSpeedMps
     }
 
     /** 중복 토스트 방지 */
@@ -1530,6 +1628,29 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         }
     }
 
+    /** 속도 및 다음 분기 거리 기반 카메라 파라미터 계산 */
+    private fun getAdaptiveCameraParams(): Pair<Double, Double> {
+        val nextDistance = navigationManager.currentInstruction.value?.distanceToInstruction ?: Int.MAX_VALUE
+        if (nextDistance in 0..120) {
+            return ZOOM_LOW_SPEED to DEFAULT_TILT
+        }
+
+        val speed = lastSpeedMps.coerceIn(0f, SPEED_MAX_MPS)
+        return when {
+            speed >= SPEED_THRESHOLD_FAST -> ZOOM_HIGH_SPEED to HIGH_SPEED_TILT
+            speed <= SPEED_THRESHOLD_SLOW -> ZOOM_LOW_SPEED to DEFAULT_TILT
+            else -> ZOOM_DEFAULT to DEFAULT_TILT
+        }
+    }
+
+    private fun resolveZoom(target: Double): Double {
+        return if (abs(lastNavigationZoom - target) > CAMERA_ZOOM_EPS) target else lastNavigationZoom
+    }
+
+    private fun resolveTilt(target: Double): Double {
+        return if (abs(lastNavigationTilt - target) > CAMERA_TILT_EPS) target else lastNavigationTilt
+    }
+
     /**
      * 지도를 경로에 맞게 자동 추적 (현재 위치를 중앙에 배치, 3D 뷰)
      * GPS bearing을 사용하여 실제 이동 방향 반영
@@ -1554,15 +1675,18 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
             // 네비게이션 뷰 설정
             if (bearing > 0) {
-                // 네비게이션 모드의 줌과 방향 저장
-                lastNavigationZoom = 17.0
+                val (targetZoom, targetTilt) = getAdaptiveCameraParams()
+                val resolvedZoom = resolveZoom(targetZoom)
+                val resolvedTilt = resolveTilt(targetTilt)
+                lastNavigationZoom = resolvedZoom
+                lastNavigationTilt = resolvedTilt
                 lastNavigationBearing = bearing
 
                 // 현재 위치를 중심으로 한 카메라 설정
                 val cameraPosition = CameraPosition(
                     location,            // 카메라 타겟 (현재 위치를 중앙에)
-                    lastNavigationZoom,  // 줌 레벨
-                    0.0,                 // 기울기
+                    resolvedZoom,        // 줌 레벨
+                    resolvedTilt,        // 기울기
                     bearing.toDouble()   // GPS bearing (실제 이동 방향)
                 )
 
@@ -1573,10 +1697,15 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 Timber.d("🗺️ Navigation view: location=$location, GPS bearing=$bearing°, zoom=$lastNavigationZoom")
             } else {
                 // 기본 뷰 (bearing 없을 때)
+                val (targetZoom, targetTilt) = getAdaptiveCameraParams()
+                val resolvedZoom = resolveZoom(targetZoom)
+                val resolvedTilt = resolveTilt(targetTilt)
+                lastNavigationZoom = resolvedZoom
+                lastNavigationTilt = resolvedTilt
                 val cameraPosition = CameraPosition(
                     location,
-                    17.0,
-                    0.0,
+                    resolvedZoom,
+                    resolvedTilt,
                     0.0
                 )
                 val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
@@ -1595,12 +1724,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             // 부드러운 회전을 위한 보간
             val diff = if (lastBearing > 0) shortestAngleDiff(lastBearing, bearing) else 0f
 
-            val smoothedBearing = if (Math.abs(diff) > 30f) {
-                // 급격한 변화는 제한 (최대 30도씩만)
-                normalizeBearing(lastBearing + if (diff > 0) 30f else -30f)
-            } else if (Math.abs(diff) > 1f) {
-                // 부드러운 보간 (60% 적용)
-                normalizeBearing(lastBearing + diff * 0.6f)
+            val absDiff = abs(diff)
+            val smoothedBearing = if (absDiff > 45f) {
+                // 급격한 변화는 제한 (최대 45도씩만) - 기존보다 빠르게 추종
+                normalizeBearing(lastBearing + if (diff > 0) 45f else -45f)
+            } else if (absDiff > 0.5f) {
+                // 보간 비율 상향(85%)으로 응답 속도 개선
+                normalizeBearing(lastBearing + diff * 0.85f)
             } else {
                 // 변화량이 작으면 이전 베어링 유지
                 lastBearing
@@ -1609,15 +1739,18 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             if (smoothedBearing > 0) {
                 lastBearing = smoothedBearing
 
-                // 네비게이션 모드의 줌과 방향 저장
-                lastNavigationZoom = 17.0
+                val (targetZoom, targetTilt) = getAdaptiveCameraParams()
+                val resolvedZoom = resolveZoom(targetZoom)
+                val resolvedTilt = resolveTilt(targetTilt)
+                lastNavigationZoom = resolvedZoom
+                lastNavigationTilt = resolvedTilt
                 lastNavigationBearing = smoothedBearing
 
                 // 현재 위치를 중심으로 한 카메라 설정
                 val cameraPosition = CameraPosition(
                     location,
-                    lastNavigationZoom,
-                    0.0,
+                    resolvedZoom,
+                    resolvedTilt,
                     smoothedBearing.toDouble()
                 )
 
@@ -1749,8 +1882,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             yy = lineStart.longitude + param * D
         }
 
-        val dx = point.latitude - xx
-        val dy = point.longitude - yy
+        point.latitude - xx
+        point.longitude - yy
         return calculateDistance(point, LatLng(xx, yy))
     }
 
@@ -1759,7 +1892,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      */
     private fun calculateDistance(latLng1: LatLng, latLng2: LatLng): Float {
         val results = FloatArray(1)
-        android.location.Location.distanceBetween(
+        Location.distanceBetween(
             latLng1.latitude, latLng1.longitude,
             latLng2.latitude, latLng2.longitude,
             results
@@ -1853,12 +1986,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             // 회전이 급격하지 않도록 부드럽게 처리
             val diff = if (lastBearing > 0) shortestAngleDiff(lastBearing, bearing) else 0f
 
-            val smoothedBearing = if (Math.abs(diff) > 30f) {
-                // 급격한 변화는 제한 (최대 30도씩만)
-                normalizeBearing(lastBearing + if (diff > 0) 30f else -30f)
-            } else if (Math.abs(diff) > 1f) {
-                // 빠른 보간 (60% 적용)
-                normalizeBearing(lastBearing + diff * 0.6f)
+            val absDiff = abs(diff)
+            val smoothedBearing = if (absDiff > 45f) {
+                // 급격한 변화 제한을 완화하여 더 빠른 회전 허용
+                normalizeBearing(lastBearing + if (diff > 0) 45f else -45f)
+            } else if (absDiff > 0.5f) {
+                // 보간 비율 상향(85%) 적용
+                normalizeBearing(lastBearing + diff * 0.85f)
             } else {
                 // 변화량이 작으면 이전 베어링 유지
                 lastBearing
@@ -1867,15 +2001,18 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             if (smoothedBearing > 0) {
                 lastBearing = smoothedBearing
 
-                // 네비게이션 모드의 줌과 방향 저장
-                lastNavigationZoom = 17.0
+                val (targetZoom, targetTilt) = getAdaptiveCameraParams()
+                val resolvedZoom = resolveZoom(targetZoom)
+                val resolvedTilt = resolveTilt(targetTilt)
+                lastNavigationZoom = resolvedZoom
+                lastNavigationTilt = resolvedTilt
                 lastNavigationBearing = smoothedBearing
 
                 // 현재 위치를 지도 중앙에 오도록 설정
                 val cameraPosition = CameraPosition(
                     location,            // 현재 위치를 중앙에
-                    lastNavigationZoom,  // 줌 레벨
-                    0.0,                 // 기울기
+                    resolvedZoom,        // 줌 레벨
+                    resolvedTilt,        // 기울기
                     smoothedBearing.toDouble() // 진행 방향
                 )
 
@@ -1917,6 +2054,22 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         )
     }
 
+    private fun maybeSendTelemetry(location: Location) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastTelemetrySentElapsed < TELEMETRY_INTERVAL_MS) return
+        lastTelemetrySentElapsed = now
+
+        val payload = VehicleLocationPayload(
+            vecNavType = 1,
+            vecLat = location.latitude,
+            vecLon = location.longitude,
+            vecAcc = location.accuracy.toDouble(),
+            regDate = telemetryDateFormat.format(Date())
+        )
+
+        navigationViewModel.sendTelemetry(vehicleId, payload)
+    }
+
     /**
      * 경로 재검색 요청
      */
@@ -1928,6 +2081,12 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         isRerouting = true
         Timber.d("🔄 Requesting reroute from current location: $currentLocation")
+        pendingRerouteLocation = currentLocation
+        lastInstructionCleanMessage = null
+        lastInstructionTargetIndex = null
+        if (voiceGuideManager.isReady()) {
+            voiceGuideManager.speakPlain("경로를 재탐색합니다")
+        }
         navigationViewModel.reroute(currentLocation)
 
         // 재검색 중 안내 메시지 표시
@@ -1979,7 +2138,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 isUsingFused = false
                 Timber.d("📍 Fused location updates stopped")
             }
-            val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
             locationManager.removeUpdates(locationListener)
             Timber.d("📍 Location updates stopped")
         } catch (e: Exception) {

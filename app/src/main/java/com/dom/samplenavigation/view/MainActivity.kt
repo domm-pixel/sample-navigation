@@ -14,12 +14,15 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.activity.viewModels
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.dom.samplenavigation.R
 import com.dom.samplenavigation.base.BaseActivity
 import com.dom.samplenavigation.databinding.ActivityMainBinding
+import com.dom.samplenavigation.navigation.model.NavigationOptionRoute
 import com.dom.samplenavigation.navigation.model.NavigationRoute
+import com.dom.samplenavigation.view.adapter.RouteOptionAdapter
 import com.dom.samplenavigation.view.viewmodel.MainViewModel
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
@@ -49,6 +52,8 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
     private var startMarker: Marker? = null
     private var endMarker: Marker? = null
     private var currentRoute: NavigationRoute? = null
+    private lateinit var routeOptionAdapter: RouteOptionAdapter
+    private var routeOptions: List<NavigationOptionRoute> = emptyList()
     
     companion object {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1000
@@ -58,11 +63,18 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         super.onCreate(savedInstanceState)
         
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+
+        routeOptionAdapter = RouteOptionAdapter { option ->
+            mainViewModel.selectRoute(option)
+        }
         
         binding {
             loadMap()
             getCurrentLocation()
             setupObservers()
+            rvRouteOptions.apply {
+                adapter = routeOptionAdapter
+            }
 
             // 목적지 입력 (클릭 시 입력 다이얼로그 표시 또는 직접 텍스트 입력)
 //            tvDestination.setOnClickListener {
@@ -134,18 +146,34 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
      */
     private fun setupObservers() {
         binding {
+            mainViewModel.navigationOptions.observe(this@MainActivity) { options ->
+                routeOptions = options
+                routeOptionAdapter.submitList(options)
+                if (options.isNullOrEmpty()) {
+                    rvRouteOptions.visibility = View.GONE
+                    btnStartNavigation.visibility = View.GONE
+                    routeOptionAdapter.updateSelection(null)
+                } else {
+                    rvRouteOptions.visibility = View.VISIBLE
+                    mainViewModel.navigationRoute.value?.let { selectedRoute ->
+                        options.firstOrNull { it.route == selectedRoute }?.let { selected ->
+                            routeOptionAdapter.updateSelection(selected.optionType)
+                        }
+                    }
+                }
+            }
+
             // 경로 검색 결과 관찰
             mainViewModel.navigationRoute.observe(this@MainActivity) { route ->
-                route?.let {
-                    currentRoute = it
-                    displayRoute(it)
-                    
-                    // 경로 정보 다이얼로그 표시 (비용 정보 포함)
-                    showRouteInfoDialog(it)
-                    
-                    // 안내 시작 버튼 표시
+                if (route != null) {
+                    currentRoute = route
+                    displayRoute(route)
                     btnStartNavigation.visibility = View.VISIBLE
+                    val selected = routeOptions.firstOrNull { it.route == route }
+                    selected?.let { routeOptionAdapter.updateSelection(it.optionType) }
                     Timber.d("✅ Route displayed, navigation button shown")
+                } else {
+                    btnStartNavigation.visibility = View.GONE
                 }
             }
 
@@ -154,6 +182,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                 message?.let {
                     Toast.makeText(this@MainActivity, it, Toast.LENGTH_SHORT).show()
                     btnStartNavigation.visibility = View.GONE
+                    rvRouteOptions.visibility = View.GONE
+                    routeOptionAdapter.submitList(emptyList())
+                    routeOptionAdapter.updateSelection(null)
+                    routeOptions = emptyList()
                 }
             }
         }
@@ -516,6 +548,16 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         
         // ViewModel의 주소 정보 초기화
         mainViewModel.destinationAddress = null
+        routeOptions = emptyList()
+
+        if (::routeOptionAdapter.isInitialized) {
+            routeOptionAdapter.submitList(emptyList())
+            routeOptionAdapter.updateSelection(null)
+        }
+
+        binding {
+            rvRouteOptions.visibility = View.GONE
+        }
         
         // 안내 시작 버튼 숨기기
         binding {

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.dom.samplenavigation.api.navigation.repo.NavigationRepository
 import com.dom.samplenavigation.base.BaseViewModel
 import com.dom.samplenavigation.navigation.mapper.NavigationMapper
+import com.dom.samplenavigation.navigation.model.NavigationOptionRoute
 import com.dom.samplenavigation.navigation.model.NavigationRoute
 import com.naver.maps.geometry.LatLng
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -21,6 +22,9 @@ class MainViewModel @Inject constructor(
     private val _navigationRoute = MutableLiveData<NavigationRoute?>()
     val navigationRoute: LiveData<NavigationRoute?> = _navigationRoute
 
+    private val _navigationOptions = MutableLiveData<List<NavigationOptionRoute>>(emptyList())
+    val navigationOptions: LiveData<List<NavigationOptionRoute>> = _navigationOptions
+
     private val _errorMessage = MutableLiveData<String?>()
     val errorMessage: LiveData<String?> = _errorMessage
 
@@ -34,6 +38,7 @@ class MainViewModel @Inject constructor(
                 _isLoading.value = true
                 _errorMessage.value = null
                 _navigationRoute.value = null
+                _navigationOptions.value = emptyList()
 
                 navigationRepository.getPathWithCoordinates(
                     startLocation.latitude,
@@ -41,11 +46,12 @@ class MainViewModel @Inject constructor(
                     destination
                 ).collect { result ->
                     result.onSuccess { resultPath ->
-                        val navigationRoute = NavigationMapper.mapToNavigationRoute(resultPath)
-                        if (navigationRoute != null) {
-                            _navigationRoute.value = navigationRoute
+                        val optionRoutes = NavigationMapper.mapToNavigationOptionRoutes(resultPath)
+                        if (optionRoutes.isNotEmpty()) {
+                            _navigationOptions.value = optionRoutes
+                            selectRoute(optionRoutes.first())
                             destinationAddress = destination
-                            Timber.d("✅ Path searched successfully: ${navigationRoute.summary.totalDistance}m")
+                            Timber.d("✅ Path searched successfully: ${optionRoutes.first().route.summary.totalDistance}m")
                         } else {
                             _errorMessage.value = "경로 데이터를 처리할 수 없습니다."
                             Timber.e("❌ Failed to map route data")
@@ -62,5 +68,9 @@ class MainViewModel @Inject constructor(
                 _isLoading.value = false
             }
         }
+    }
+
+    fun selectRoute(option: NavigationOptionRoute) {
+        _navigationRoute.value = option.route
     }
 }
