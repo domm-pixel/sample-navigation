@@ -11,6 +11,7 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
@@ -532,13 +533,14 @@ abstract class BaseActivity<T : ViewDataBinding>(
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN)
     }
 
-//    fun hideSoftKeyboard() {
-//        if (currentFocus != null) {
-//            val inputMethodManager: InputMethodManager =
-//                getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-//            inputMethodManager.hideSoftInputFromWindow(currentFocus!!.windowToken, 0)
-//        }
-//    }
+    fun hideSoftKeyboard() {
+        if (currentFocus != null) {
+            val inputMethodManager: InputMethodManager =
+                getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+            inputMethodManager.hideSoftInputFromWindow(currentFocus!!.windowToken, 0)
+            currentFocus!!.clearFocus()
+        }
+    }
 //
 //    fun setKeyboardVisibilityListener() {
 //        window.decorView.rootView.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener{

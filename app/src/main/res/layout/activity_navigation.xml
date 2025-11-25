@@ -80,6 +80,22 @@
 
         </LinearLayout>
 
+        <ImageButton
+            android:id="@+id/btn_enter_pip"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="16dp"
+            android:layout_marginTop="40dp"
+            android:background="@android:color/white"
+            android:contentDescription="@string/pip_enter_content_description"
+            android:elevation="8dp"
+            android:padding="12dp"
+            android:scaleType="centerInside"
+            android:src="@android:drawable/ic_media_play"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            tools:ignore="ImageContrastCheck" />
+
         <!-- 현위치로 버튼 (제스처 모드에서만 표시) -->
         <Button
             android:id="@+id/btn_return_to_current_location"
@@ -161,6 +177,25 @@
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent" />
+
+        <!-- 현재 속도 표시 -->
+        <TextView
+            android:id="@+id/tv_current_speed"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="16dp"
+            android:background="#66000000"
+            android:alpha="0.5"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="12dp"
+            android:text="-- km/h"
+            android:textColor="@color/white"
+            android:textSize="30sp"
+            android:textStyle="bold"
+            app:layout_constraintTop_toBottomOf="@+id/instruction_card"
+            app:layout_constraintStart_toStartOf="parent"
+            tools:text="45 km/h" />
 
         <!-- 로딩 인디케이터 -->
         <ProgressBar

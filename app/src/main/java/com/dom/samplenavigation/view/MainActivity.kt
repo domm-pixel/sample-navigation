@@ -86,7 +86,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
             // 검색 버튼 클릭
             tvSearch.setOnClickListener {
                 // 키보드 숨기기
-                hideKeyboard()
+                hideSoftKeyboard()
                 
                 val destination = etDestination.text.toString()
                 if (destination.isEmpty() || destination == "목적지를 입력하세요") {
@@ -171,7 +171,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     btnStartNavigation.visibility = View.VISIBLE
                     val selected = routeOptions.firstOrNull { it.route == route }
                     selected?.let { routeOptionAdapter.updateSelection(it.optionType) }
-                    Timber.d("✅ Route displayed, navigation button shown")
+                    Timber.d("Route displayed, navigation button shown")
                 } else {
                     btnStartNavigation.visibility = View.GONE
                 }
@@ -242,7 +242,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     if (beforePath.isNotEmpty() && beforePath.size >= 2) {
                         val firstCongestion = section.congestion
                         groupedPaths.add(Pair(beforePath, firstCongestion))
-                        Timber.d("📍 Added pre-section path: 0-$startIndex, congestion=$firstCongestion")
+                        Timber.d("Added pre-section path: 0-$startIndex, congestion=$firstCongestion")
                     }
                 }
                 
@@ -260,7 +260,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                             currentPathGroup = gapPath.toMutableList()
                             currentCongestion = gapCongestion
                             groupedPaths.add(Pair(gapPath, gapCongestion))
-                            Timber.d("📍 Added gap path: $lastEndIndex-$startIndex, congestion=$gapCongestion")
+                            Timber.d("Added gap path: $lastEndIndex-$startIndex, congestion=$gapCongestion")
                             currentPathGroup.clear()
                             currentCongestion = null
                         }
@@ -281,7 +281,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                 }
                 
                 lastEndIndex = endIndex
-                Timber.d("📍 Section: ${section.name}, pointIndex=$startIndex-$endIndex, congestion=${section.congestion}")
+                Timber.d("Section: ${section.name}, pointIndex=$startIndex-$endIndex, congestion=${section.congestion}")
             }
             
             // 마지막 그룹 저장
@@ -295,7 +295,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                 if (remainingPath.isNotEmpty() && remainingPath.size >= 2) {
                     val lastCongestion = currentCongestion ?: sortedSections.lastOrNull()?.congestion ?: 0
                     groupedPaths.add(Pair(remainingPath, lastCongestion))
-                    Timber.d("📍 Added post-section path: $lastEndIndex-${route.path.size}, congestion=$lastCongestion")
+                    Timber.d("Added post-section path: $lastEndIndex-${route.path.size}, congestion=$lastCongestion")
                 }
             }
             
@@ -311,7 +311,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                 pathOverlays.add(overlay)
             }
             
-            Timber.d("🗺️ Total segments: ${groupedPaths.size}, Total points: ${route.path.size}")
+            Timber.d("Total segments: ${groupedPaths.size}, Total points: ${route.path.size}")
         } else {
             // sections가 없으면 전체 경로를 하나로 표시
             val overlay = PathOverlay().apply {
@@ -354,7 +354,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         // 패딩을 좀 더 크게 설정하여 경로가 잘리지 않도록 함
         nMap.moveCamera(CameraUpdate.fitBounds(bounds, 150))
 
-        Timber.d("🗺️ Route displayed with ${route.path.size} points, ${pathOverlays.size} segments by congestion")
+        Timber.d("Route displayed with ${route.path.size} points, ${pathOverlays.size} segments by congestion")
     }
     
     /**
@@ -381,7 +381,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     if (location != null) {
                         val latLng = LatLng(location.latitude, location.longitude)
                         updateCurrentLocation(latLng)
-                        Timber.d("📍 Current location obtained: $latLng (getCurrentLocation)")
+                        Timber.d("Current location obtained: $latLng (getCurrentLocation)")
                         return@addOnSuccessListener
                     }
                     
@@ -390,38 +390,38 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                         if (lastLocation != null) {
                             val latLng = LatLng(lastLocation.latitude, lastLocation.longitude)
                             updateCurrentLocation(latLng)
-                            Timber.d("📍 Current location obtained: $latLng (lastLocation fallback)")
+                            Timber.d("Current location obtained: $latLng (lastLocation fallback)")
                         } else {
                             // 3) lastLocation도 없으면 기존 LocationManager 방식 사용
-                            Timber.w("📍 FusedLocationProvider failed, using LocationManager fallback")
+                            Timber.w("FusedLocationProvider failed, using LocationManager fallback")
                             fallbackToLocationManager()
                         }
                     }.addOnFailureListener { e ->
-                        Timber.e("📍 lastLocation failed: ${e.message}, using LocationManager fallback")
+                        Timber.e("lastLocation failed: ${e.message}, using LocationManager fallback")
                         fallbackToLocationManager()
                     }
                 }
                 .addOnFailureListener { e ->
-                    Timber.e("📍 getCurrentLocation failed: ${e.message}, trying lastLocation")
+                    Timber.e("getCurrentLocation failed: ${e.message}, trying lastLocation")
                     // getCurrentLocation 실패 시 lastLocation 시도
                     fusedLocationClient.lastLocation.addOnSuccessListener { lastLocation ->
                         if (lastLocation != null) {
                             val latLng = LatLng(lastLocation.latitude, lastLocation.longitude)
                             updateCurrentLocation(latLng)
-                            Timber.d("📍 Current location obtained: $latLng (lastLocation after getCurrentLocation failed)")
+                            Timber.d("Current location obtained: $latLng (lastLocation after getCurrentLocation failed)")
                         } else {
-                            Timber.w("📍 All FusedLocationProvider methods failed, using LocationManager fallback")
+                            Timber.w("All FusedLocationProvider methods failed, using LocationManager fallback")
                             fallbackToLocationManager()
                         }
                     }.addOnFailureListener { lastLocError ->
-                        Timber.e("📍 All location methods failed: ${lastLocError.message}")
+                        Timber.e("All location methods failed: ${lastLocError.message}")
                         fallbackToLocationManager()
                     }
                 }
         } catch (e: SecurityException) {
-            Timber.e("📍 Location permission not granted: ${e.message}")
+            Timber.e("Location permission not granted: ${e.message}")
         } catch (e: Exception) {
-            Timber.e("📍 Unexpected error getting location: ${e.message}")
+            Timber.e("Unexpected error getting location: ${e.message}")
             fallbackToLocationManager()
         }
     }
@@ -436,7 +436,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
             if (lastKnownLocation != null) {
                 val latLng = LatLng(lastKnownLocation.latitude, lastKnownLocation.longitude)
                 updateCurrentLocation(latLng)
-                Timber.d("📍 Current location obtained: $latLng (LocationManager fallback)")
+                Timber.d("Current location obtained: $latLng (LocationManager fallback)")
             } else {
                 // 실시간 위치 요청
                 locationManager.requestLocationUpdates(
@@ -445,10 +445,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     1f,
                     locationListener
                 )
-                Timber.d("📍 Requesting location updates from LocationManager")
+                Timber.d("Requesting location updates from LocationManager")
             }
         } catch (e: SecurityException) {
-            Timber.e("📍 LocationManager fallback failed: ${e.message}")
+            Timber.e("LocationManager fallback failed: ${e.message}")
         }
     }
     
@@ -487,7 +487,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         }
 
         
-        Timber.d("📍 Current location updated: $latLng")
+        Timber.d("Current location updated: $latLng")
     }
     
     override fun onResume() {
@@ -519,7 +519,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 getCurrentLocation()
             } else {
-                Timber.w("📍 Location permission denied")
+                Timber.w("Location permission denied")
             }
         }
     }
@@ -581,7 +581,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
 //        val taxiFare = route.summary.taxiFare
 
         val message = buildString {
-            append("📍 거리: ${String.format("%.1f", distanceKm)}km\n")
+            append("거리: ${String.format("%.1f", distanceKm)}km\n")
             
             // 시간 표시 개선 (1시간 이상일 때 "X시간 Y분"으로 표시)
             val timeString = if (durationMin >= 60) {

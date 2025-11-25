@@ -6,4 +6,15 @@
     <string name="route_option_distance_format">거리 %1$skm</string>
     <string name="route_option_toll_format">통행료 %1$s원</string>
     <string name="route_option_toll_free">통행료 무료</string>
+    <string name="pip_action_stop_title">안내 종료</string>
+    <string name="pip_action_stop_description">현재 안내를 종료합니다</string>
+    <string name="pip_action_voice_off_title">음성 끄기</string>
+    <string name="pip_action_voice_off_description">음성 안내를 끕니다</string>
+    <string name="pip_action_voice_on_title">음성 켜기</string>
+    <string name="pip_action_voice_on_description">음성 안내를 켭니다</string>
+    <string name="pip_voice_state_on">음성 안내 켜짐</string>
+    <string name="pip_voice_state_off">음성 안내 꺼짐</string>
+    <string name="pip_enter_content_description">미니화면으로 전환</string>
+    <string name="pip_not_supported">이 기기는 PIP 모드를 지원하지 않습니다</string>
+    <string name="pip_not_ready">안내를 시작한 후에만 미니화면 전환이 가능합니다</string>
 </resources>

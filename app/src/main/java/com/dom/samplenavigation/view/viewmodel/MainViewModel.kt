@@ -51,7 +51,7 @@ class MainViewModel @Inject constructor(
                             _navigationOptions.value = optionRoutes
                             selectRoute(optionRoutes.first())
                             destinationAddress = destination
-                            Timber.d("✅ Path searched successfully: ${optionRoutes.first().route.summary.totalDistance}m")
+                            Timber.d("Path searched successfully: ${optionRoutes.first().route.summary.totalDistance}m")
                         } else {
                             _errorMessage.value = "경로 데이터를 처리할 수 없습니다."
                             Timber.e("❌ Failed to map route data")

@@ -2,14 +2,24 @@ package com.dom.samplenavigation.view
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.drawable.Icon
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
 import android.os.SystemClock
+import android.os.Build
+import android.util.Rational
 import android.view.View
 import android.widget.Toast
 import androidx.activity.viewModels
@@ -22,6 +32,8 @@ import com.dom.samplenavigation.R
 import com.dom.samplenavigation.base.BaseActivity
 import com.dom.samplenavigation.databinding.ActivityNavigationBinding
 import com.dom.samplenavigation.api.telemetry.model.VehicleLocationPayload
+import com.dom.samplenavigation.navigation.filter.KalmanLocationFilter
+import com.dom.samplenavigation.navigation.filter.PathSpatialIndex
 import com.dom.samplenavigation.navigation.manager.NavigationManager
 import com.dom.samplenavigation.navigation.model.Instruction
 import com.dom.samplenavigation.navigation.model.NavigationRoute
@@ -56,6 +68,7 @@ import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 @AndroidEntryPoint
@@ -66,6 +79,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private val navigationViewModel: NavigationViewModel by viewModels()
     private lateinit var navigationManager: NavigationManager
     private lateinit var voiceGuideManager: VoiceGuideManager
+    private val kalmanFilter = KalmanLocationFilter()  // 칼만 필터 인스턴스
+    private var pathSpatialIndex: PathSpatialIndex? = null  // 공간 인덱스 (경로 로드 시 생성)
 
     private var naverMap: NaverMap? = null
     private var pathOverlays: MutableList<PathOverlay> = mutableListOf()
@@ -103,11 +118,39 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var lastTelemetrySentElapsed: Long = 0L
     private val telemetryDateFormat = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault())
     private val vehicleId: Int = 1 // TODO replace with runtime vehicle identifier
+    private var inLowAccuracyMode: Boolean = false
+    private var accuracyStableCount: Int = 0
+    private var isVoiceGuideEnabled: Boolean = true
+    private var suppressVoiceSwitchCallback: Boolean = false
+    private var isInPictureInPictureModeCompat: Boolean = false
+    private val pipActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ACTION_PIP_STOP_NAVIGATION -> {
+                    Timber.d("PIP action: stop navigation")
+                    stopNavigationAndFinish()
+                }
+                ACTION_PIP_TOGGLE_VOICE -> {
+                    Timber.d("PIP action: toggle voice guide")
+                    toggleVoiceGuideFromPip()
+                }
+            }
+        }
+    }
 
     // Fused Location
     private lateinit var fusedClient: FusedLocationProviderClient
     private var fusedCallback: LocationCallback? = null
     private var isUsingFused: Boolean = false
+
+    /**
+     * 스마트 재탐색 결정 결과
+     */
+    private data class RerouteDecision(
+        val shouldReroute: Boolean,
+        val confidence: Float,  // 0.0 ~ 1.0
+        val reason: String
+    )
 
     companion object {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1001
@@ -121,7 +164,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         private const val TUNNEL_ENTER_MS = LOCATION_TIMEOUT      // 터널 진입 판정(모노토닉)
         private const val TUNNEL_EXIT_MS  = 3_000L                // 신호 회복 후 이탈 히스테리시스
         private const val SPEED_MIN_MPS   = 1.0f                  // 최소 1 m/s (3.6 km/h)
-        private const val SPEED_MAX_MPS   = 33.3f                 // 최대 33.3 m/s (120 km/h)
+        private const val SPEED_MAX_MPS   = 55.6f                 // 최대 55.6 m/s (200 km/h)
         private const val SPEED_EMA_ALPHA = 0.25f                 // 속도 EMA 가중치
         private const val TOAST_COOLDOWN_MS = 5_000L              // 토스트 중복 방지
         private const val REROUTE_COOLDOWN_MS = 7_000L            // 재검색 쿨다운 강화
@@ -139,6 +182,12 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         private const val CAMERA_ZOOM_EPS = 0.05
         private const val CAMERA_TILT_EPS = 1.0
         private const val TELEMETRY_INTERVAL_MS = 1_000L
+        private const val ACCURACY_SNAP_THRESHOLD = 30f
+        private const val ACCURACY_STABLE_COUNT = 3
+        private const val ACTION_PIP_STOP_NAVIGATION = "com.dom.samplenavigation.action.PIP_STOP"
+        private const val ACTION_PIP_TOGGLE_VOICE = "com.dom.samplenavigation.action.PIP_TOGGLE_VOICE"
+        private const val REQUEST_CODE_PIP_STOP = 2001
+        private const val REQUEST_CODE_PIP_TOGGLE_VOICE = 2002
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -150,11 +199,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 네비게이션 매니저 초기화
         navigationManager = NavigationManager(this, lifecycleScope)
         voiceGuideManager = VoiceGuideManager(this)
+        registerPipActionReceiver()
+        updateVoiceGuideState(isVoiceGuideEnabled, fromUser = false)
 
         // VoiceGuideManager 초기화 확인 (약간의 딜레이 후)
         lifecycleScope.launch {
             kotlinx.coroutines.delay(1000)  // TTS 초기화 대기
-            Timber.d("🔊 VoiceGuideManager ready status: ${voiceGuideManager.isReady()}")
+            Timber.d("VoiceGuideManager ready status: ${voiceGuideManager.isReady()}")
         }
 
         // 전달받은 데이터 설정
@@ -165,9 +216,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         if (startLat != 0.0 && startLng != 0.0 && !destination.isNullOrEmpty()) {
             val startLocation = LatLng(startLat, startLng)
             navigationViewModel.setRoute(startLocation, destination)
-            Timber.d("📍 Navigation data set: $startLocation -> $destination")
+            Timber.d("Navigation data set: $startLocation -> $destination")
         } else {
-            Timber.w("📍 Navigation data not available")
+            Timber.w("Navigation data not available")
         }
 
         setupMap()
@@ -204,7 +255,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         val topPaddingPx = (600 * density).toInt()
         val bottomPaddingPx = (0 * density).toInt()
         naverMap.setContentPadding(0, topPaddingPx, 0, bottomPaddingPx)
-        Timber.d("🗺️ Map content padding set - top: $topPaddingPx, bottom: $bottomPaddingPx")
+        Timber.d("Map content padding set - top: $topPaddingPx, bottom: $bottomPaddingPx")
 
         // 지도 제스처 리스너 설정
         naverMap.setOnMapClickListener { _, _ ->
@@ -222,7 +273,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             }
         }
 
-        Timber.d("🗺️ Map is ready, creating current location marker")
+        Timber.d("Map is ready, creating current location marker")
 
         // 현재 위치 마커 생성
         createCurrentLocationMarker()
@@ -239,7 +290,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         navigationManager.navigationState.observe(this) { state ->
             // state가 null이면 아무것도 하지 않음
             if (state == null) {
-                Timber.w("⚠️ Navigation state is null")
+                Timber.w("Navigation state is null")
                 return@observe
             }
 
@@ -252,91 +303,213 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 stopNavigationMode()
             }
 
-            // 제스처 모드가 아닐 때만 자동 추적 실행
-            if (!isGestureMode) {
-                // 현재 위치가 있으면 경로와 통합하여 처리
-                if (state.isNavigating && isNavigating) {
-                    state.currentLocation?.let { currentLocation ->
-                        state.currentRoute?.let { route ->
-                            if (isMapReady) {
-                                try {
-                                    // 1. 앞으로 진행할 경로에서 가장 가까운 지점 찾기
-                                    val nearestPoint = findClosestPathPointAhead(
-                                        currentLocation,
-                                        route.path,
-                                        currentPathIndex
-                                    )
-                                    val distanceToPath =
-                                        calculateDistance(currentLocation, route.path[nearestPoint])
+            // 현재 위치가 있으면 경로와 통합하여 처리
+            if (state.isNavigating && isNavigating) {
+                state.currentLocation?.let { currentLocation ->
+                    state.currentRoute?.let { route ->
+                        if (isMapReady) {
+                            if (inLowAccuracyMode) {
+                                Timber.w("Low accuracy mode active - skipping snap/reroute (accuracy=${lastLocation?.accuracy})")
+                                updateCurrentLocationMarker(currentLocation)
+                                if (!isGestureMode) {
+                                    followRoute(currentLocation)
+                                }
+                                return@let
+                            }
+                            try {
+                                // 1. 가중치 기반 경로 매칭으로 가장 가까운 지점 찾기
+                                val currentBearing = if (lastBearing > 0f) lastBearing else null
+                                val currentSpeed = lastSpeedMps.coerceAtLeast(0f)
 
-                                    Timber.d("📍 GPS Location: $currentLocation")
-                                    Timber.d("📍 Nearest path point index: $nearestPoint (current: $currentPathIndex), distance: ${distanceToPath}m")
+                                val nearestPoint = findClosestPathPointWithWeight(
+                                    currentLocation = currentLocation,
+                                    path = route.path,
+                                    currentIndex = currentPathIndex,
+                                    currentBearing = currentBearing,
+                                    currentSpeed = currentSpeed
+                                )
+                                val distanceToPath =
+                                    calculateDistance(currentLocation, route.path[nearestPoint])
 
-                                    // 2. 경로 이탈 확인 - 70m 이상이면 후보
-                                    if (distanceToPath >= REROUTE_THRESHOLD && !isRerouting) {
-                                        // 정확도/속도/터널 상태 필터
-                                        val acc = lastLocation?.accuracy ?: 0f
+                                Timber.d("GPS Location: $currentLocation")
+                                Timber.d("Nearest path point index: $nearestPoint (current: $currentPathIndex), distance: ${distanceToPath}m")
+
+                                    // 2. 예측 기반 재탐색 체크 (현재 위치가 경로에 가까워도 미리 확인)
+                                    val shouldPreReroute = if (
+                                        !isRerouting &&
+                                        lastBearing > 0f &&
+                                        lastLocation != null &&
+                                        lastLocation!!.speed > 5f  // 5m/s 이상 (18km/h)
+                                    ) {
+                                        val predictedDistance = lastLocation!!.speed * 5f  // 5초 후 거리
+                                        val predictedLocation = calculatePositionAhead(
+                                            currentLocation,
+                                            lastBearing,
+                                            predictedDistance.toDouble()
+                                        )
+
+                                        // 예상 위치가 경로에서 얼마나 떨어져 있는지 확인
+                                        val predictedNearestPoint = findClosestPathPointWithWeight(
+                                            currentLocation = predictedLocation,
+                                            path = route.path,
+                                            currentIndex = currentPathIndex,
+                                            currentBearing = lastBearing,
+                                            currentSpeed = lastLocation!!.speed
+                                        )
+                                        val predictedDistanceToPath = calculateDistance(
+                                            predictedLocation,
+                                            route.path[predictedNearestPoint]
+                                        )
+
+                                        val preRerouteNeeded = predictedDistanceToPath > 50f
+                                        if (preRerouteNeeded) {
+                                            Timber.d("🔮 Predictive reroute: predicted location will be ${predictedDistanceToPath.toInt()}m from path in 5s")
+                                        }
+                                        preRerouteNeeded
+                                    } else {
+                                        false
+                                    }
+
+                                    // 3. 스마트 재탐색 조건 평가 (현재 위치 기반)
+                                    // 제스처 모드여도 재탐색은 실행 (UI 추적만 막음)
+                                    if ((distanceToPath >= 50f || shouldPreReroute) && !isRerouting) {
+                                        Timber.d("🔍 Reroute check: distanceToPath=${distanceToPath}m, shouldPreReroute=$shouldPreReroute, isGestureMode=$isGestureMode")
+                                        val acc = lastLocation?.accuracy ?: Float.MAX_VALUE
                                         val spd = lastLocation?.speed ?: 0f
-                                        val accuracyOk = acc in 0f..OFF_ROUTE_MIN_ACCURACY
-                                        val speedOk = spd > 0.3f
-                                        val tunnelOk = !isInTunnel
                                         val nowMono = SystemClock.elapsedRealtime()
                                         val timeSinceStop = nowMono - lastStoppedElapsedMs
-                                        val resumeOk = timeSinceStop > STOP_RESUME_GRACE_MS
+                                        val currentTime = System.currentTimeMillis()
+                                        val timeSinceLastReroute = currentTime - lastRerouteTime
 
-                                        if (accuracyOk && speedOk && tunnelOk && resumeOk) {
-                                            offRouteConfirmCount += 1
-                                            Timber.d("🔎 Off-route candidate: d=${distanceToPath}m, acc=${acc}m, spd=${spd}m/s, hit=${offRouteConfirmCount}, Δstop=${timeSinceStop}ms")
+                                        // 경로 방향 계산
+                                        val pathBearing = if (nearestPoint < route.path.size - 1) {
+                                            calculateBearingFromPath(route.path, nearestPoint)
                                         } else {
-                                            // 조건 불충족 시 카운터 리셋
-                                            offRouteConfirmCount = 0
-                                            Timber.d("⏸️ Off-route suppressed: accOk=$accuracyOk, speedOk=$speedOk, tunnelOk=$tunnelOk, resumeOk=$resumeOk (Δstop=${timeSinceStop}ms)")
+                                            null
                                         }
 
-                                        // 연속 N회 확정 + 쿨다운 체크 후 재검색 실행
-                                        if (offRouteConfirmCount >= OFF_ROUTE_CONFIRM_COUNT) {
-                                            offRouteConfirmCount = 0
-                                            val currentTime = System.currentTimeMillis()
-                                            if (currentTime - lastRerouteTime > REROUTE_COOLDOWN_MS) {
-                                                Timber.d("🔄 Off-route confirmed! Distance: ${distanceToPath}m - Initiating reroute...")
-                                                val rerouteFrom = lastKnownLocation ?: currentLocation
-                                                requestReroute(rerouteFrom)
-                                                lastRerouteTime = currentTime
-
-                                                // 경로 이탈 시에는 실제 GPS 위치에 마커 표시
-                                                updateCurrentLocationMarker(rerouteFrom)
-                                                followRoute(rerouteFrom)
+                                        // 스마트 재탐색 평가
+                                        val decision = evaluateRerouteCondition(
+                                            distanceToPath = if (shouldPreReroute) {
+                                                // 예측 기반이면 예측 거리 사용
+                                                val predictedDistance = spd * 5f
+                                                val predictedLocation = calculatePositionAhead(
+                                                    currentLocation,
+                                                    lastBearing,
+                                                    predictedDistance.toDouble()
+                                                )
+                                                val predictedNearestPoint = findClosestPathPointWithWeight(
+                                                    currentLocation = predictedLocation,
+                                                    path = route.path,
+                                                    currentIndex = currentPathIndex,
+                                                    currentBearing = lastBearing,
+                                                    currentSpeed = spd
+                                                )
+                                                calculateDistance(predictedLocation, route.path[predictedNearestPoint])
                                             } else {
-                                                Timber.d("⏳ Reroute request skipped (cooldown)")
+                                                distanceToPath
+                                            },
+                                            currentSpeed = spd,
+                                            accuracy = acc,
+                                            timeSinceLastReroute = timeSinceLastReroute,
+                                            consecutiveOffRouteCount = offRouteConfirmCount,
+                                            isInTunnel = isInTunnel,
+                                            lastKnownBearing = if (lastBearing > 0f) lastBearing else null,
+                                            pathBearing = pathBearing
+                                        )
+
+                                        // 예측 기반 재탐색인 경우 확신도 보정
+                                        val finalDecision = if (shouldPreReroute && !decision.shouldReroute) {
+                                            // 예측 기반이지만 현재 위치는 괜찮은 경우
+                                            // 예측 신호를 추가하여 확신도 증가
+                                            val adjustedConfidence = (decision.confidence + 0.15f).coerceIn(0f, 1f)
+                                            val adjustedReasons = if (decision.reason.isNotEmpty()) {
+                                                "예측 기반 (5초 후 경로 이탈 예상), ${decision.reason}"
+                                            } else {
+                                                "예측 기반 (5초 후 경로 이탈 예상)"
+                                            }
+                                            RerouteDecision(
+                                                shouldReroute = adjustedConfidence >= 0.6f,
+                                                confidence = adjustedConfidence,
+                                                reason = adjustedReasons
+                                            )
+                                        } else {
+                                            decision
+                                        }
+
+                                        Timber.d("Smart reroute evaluation: shouldReroute=${finalDecision.shouldReroute}, confidence=${String.format("%.2f", finalDecision.confidence)}, reason=${finalDecision.reason}, predictive=${shouldPreReroute}")
+
+                                        if (finalDecision.shouldReroute) {
+                                            // 재탐색 실행
+                                            offRouteConfirmCount = 0  // 재탐색 후 리셋
+                                            val rerouteType = if (shouldPreReroute) "Predictive" else "Smart"
+                                            Timber.d("$rerouteType reroute triggered! Confidence: ${String.format("%.1f", finalDecision.confidence * 100)}% - ${finalDecision.reason}")
+                                            val rerouteFrom = lastKnownLocation ?: currentLocation
+                                            requestReroute(rerouteFrom)
+                                            lastRerouteTime = currentTime
+
+                                            // 경로 이탈 시에는 실제 GPS 위치에 마커 표시
+                                            updateCurrentLocationMarker(rerouteFrom)
+                                            followRoute(rerouteFrom)
+                                        } else {
+                                            // 재탐색 조건 미충족 - 연속 이탈 카운터 업데이트
+                                            if (distanceToPath >= REROUTE_THRESHOLD) {
+                                                // 정차 후 재가속 체크
+                                                val resumeOk = timeSinceStop > STOP_RESUME_GRACE_MS
+                                                if (resumeOk && acc <= OFF_ROUTE_MIN_ACCURACY && spd > 0.3f) {
+                                                    offRouteConfirmCount += 1
+                                                    Timber.d("Off-route candidate (confidence=${String.format("%.2f", finalDecision.confidence)}): ${finalDecision.reason}")
+                                                } else {
+                                                    offRouteConfirmCount = 0
+                                                    Timber.d("Off-route suppressed: ${finalDecision.reason}")
+                                                }
+                                            } else {
+                                                // 거리가 가까우면 카운터 리셋
+                                                offRouteConfirmCount = 0
                                             }
                                         }
                                     } else {
-                                        // 3. 70m 이내면 항상 경로 위에 스냅 (팩맨처럼!)
+                                        // 3. 50m 이내면 항상 경로 위에 스냅 (팩맨처럼!)
                                         // 재검색 플래그 해제 (경로 복귀)
                                         if (isRerouting) {
                                             isRerouting = false
-                                            Timber.d("✅ Returned to route")
+                                            Timber.d("Returned to route")
                                         }
 
                                         // 경로 안이면 오프루트 카운터 리셋
                                         offRouteConfirmCount = 0
 
+                                    // 제스처 모드가 아닐 때만 자동 추적 실행
+                                    if (!isGestureMode) {
                                         // 진행 방향 고려하여 인덱스 업데이트
-                                        if (nearestPoint >= currentPathIndex) {
+                                        // 고속에서는 더 공격적으로 인덱스 업데이트 (뒤처짐 방지)
+                                        val speedKmh = lastSpeedMps * 3.6f
+                                        val shouldUpdateIndex = if (speedKmh > 100f) {
+                                            // 고속(100km/h 이상)에서는 nearestPoint가 currentIndex보다 작아도
+                                            // 거리가 가까우면 업데이트 (뒤처짐 방지)
+                                            nearestPoint >= currentPathIndex || 
+                                            (nearestPoint >= currentPathIndex - 10 && distanceToPath < 30f)
+                                        } else {
+                                            nearestPoint >= currentPathIndex
+                                        }
+                                        
+                                        if (shouldUpdateIndex) {
                                             val oldIndex = currentPathIndex
                                             currentPathIndex = nearestPoint
 
                                             if (currentPathIndex > oldIndex) {
-                                                Timber.d("📍 Path index progressed: $oldIndex -> $currentPathIndex")
+                                                Timber.d("Path index progressed: $oldIndex -> $currentPathIndex (speed=${speedKmh.toInt()}km/h)")
                                                 // 지나온 경로 숨기기
                                                 updatePassedRoute(route.path, currentPathIndex)
+                                            } else if (currentPathIndex < oldIndex && speedKmh > 100f) {
+                                                Timber.d("Path index adjusted backward: $oldIndex -> $currentPathIndex (high speed=${speedKmh.toInt()}km/h, distance=${distanceToPath.toInt()}m)")
                                             }
                                         }
 
-                                        // 4. 🎮 팩맨 모드: 마커는 항상 경로 위에! (Snap-to-road)
+                                        // 4. 팩맨 모드: 마커는 항상 경로 위에! (Snap-to-road)
                                         val pathLocation = route.path[currentPathIndex]
                                         updateCurrentLocationMarker(pathLocation)
-                                        Timber.d("🎮 Marker snapped to path: $pathLocation (distance from GPS: ${distanceToPath}m)")
+                                        Timber.d("Marker snapped to path: $pathLocation (distance from GPS: ${distanceToPath}m)")
 
                                         // 5. 진행 방향 계산 및 지도 회전 (한 스텝 이전 경로의 방향 사용)
                                         val bearingIndex =
@@ -349,52 +522,59 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                                         } else {
                                             followRoute(pathLocation)
                                         }
-
-                                        // 6. 도착지 근처 도착 확인 (25미터)
-                                        val distanceToDestination = calculateDistance(
-                                            pathLocation,
-                                            route.summary.endLocation
-                                        )
-                                        if (distanceToDestination <= ARRIVAL_THRESHOLD) {
-                                            Timber.d("✅ Arrived at destination! (${distanceToDestination}m)")
-                                            navigationManager.stopNavigation()
-                                            Toast.makeText(this, "목적지에 도착했습니다!", Toast.LENGTH_SHORT)
-                                                .show()
-                                        }
+                                    } else {
+                                        // 제스처 모드일 때는 실제 GPS 위치에 마커만 표시
+                                        updateCurrentLocationMarker(currentLocation)
                                     }
-                                } catch (e: Exception) {
-                                    Timber.e("❌ Error in navigation tracking: ${e.message}")
-                                    e.printStackTrace()
+
+                                    // 6. 도착지 근처 도착 확인 (25미터)
+                                    val checkLocation = if (!isGestureMode && currentPathIndex < route.path.size) {
+                                        route.path[currentPathIndex]
+                                    } else {
+                                        currentLocation
+                                    }
+                                    val distanceToDestination = calculateDistance(
+                                        checkLocation,
+                                        route.summary.endLocation
+                                    )
+                                    if (distanceToDestination <= ARRIVAL_THRESHOLD) {
+                                        Timber.d("Arrived at destination! (${distanceToDestination}m)")
+                                        navigationManager.stopNavigation()
+                                        Toast.makeText(this, "목적지에 도착했습니다!", Toast.LENGTH_SHORT)
+                                            .show()
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                Timber.e(" Error in navigation tracking: ${e.message}")
+                                e.printStackTrace()
                             }
                         }
                     } ?: run {
-                        Timber.w("📍 Current location is null")
+                        Timber.w("Current location is null")
                         // GPS 끊김 시 추정 항법 시도 (경로가 있을 때만)
                         state.currentRoute?.let { route ->
                             checkAndHandleLocationTimeout(route)
                         }
                     }
-                } else if (!isNavigating && state.currentRoute != null) {
-                    // 네비게이션 시작 전 초기 위치 표시
-                    state.currentRoute?.let { route ->
-                        if (isMapReady) {
-                            currentPathIndex = 0
-                            updateCurrentLocationMarker(route.summary.startLocation)
-                            Timber.d("📍 Marker set to start location: ${route.summary.startLocation}")
-                        }
+                }
+            } else if (!isNavigating && state.currentRoute != null) {
+                // 네비게이션 시작 전 초기 위치 표시
+                state.currentRoute?.let { route ->
+                    if (isMapReady) {
+                        currentPathIndex = 0
+                        updateCurrentLocationMarker(route.summary.startLocation)
+                        Timber.d("Marker set to start location: ${route.summary.startLocation}")
                     }
                 }
-            } else {
-                // 제스처 모드에서는 자동 추적 비활성화
-                Timber.d("🎯 Gesture mode active - auto tracking disabled")
             }
+            updatePictureInPictureParams()
         }
 
         // 현재 안내 메시지 관찰 (UI 업데이트만)
         navigationManager.currentInstruction.observe(this) { instruction ->
             instruction?.let {
                 updateInstructionUI(it)
+                updatePictureInPictureParams()
             }
         }
 
@@ -404,12 +584,12 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 navigationManager.currentInstruction.value?.let { instruction ->
                     if (voiceGuideManager.isReady()) {
                         voiceGuideManager.speakInstruction(instruction)
-                        Timber.d("🔊 Voice instruction spoken: ${instruction.message}")
+                        Timber.d("Voice instruction spoken: ${instruction.message}")
                     } else {
-                        Timber.w("🔊 VoiceGuideManager not ready")
+                        Timber.w("VoiceGuideManager not ready")
                     }
                 } ?: run {
-                    Timber.w("🔊 Current instruction is null")
+                    Timber.w("Current instruction is null")
                 }
             }
         }
@@ -420,12 +600,12 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 navigationManager.currentInstruction.value?.let { instruction ->
                     if (voiceGuideManager.isReady()) {
                         voiceGuideManager.speakNavigationStart(instruction)
-                        Timber.d("🔊 Navigation start announcement: 경로 안내를 시작합니다 + ${instruction.message}")
+                        Timber.d("Navigation start announcement: 경로 안내를 시작합니다 + ${instruction.message}")
                     } else {
-                        Timber.w("🔊 VoiceGuideManager not ready for start announcement")
+                        Timber.w("VoiceGuideManager not ready for start announcement")
                     }
                 } ?: run {
-                    Timber.w("🔊 Current instruction is null for start announcement")
+                    Timber.w("Current instruction is null for start announcement")
                 }
             }
         }
@@ -440,6 +620,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 경로 데이터 관찰
         navigationViewModel.navigationRoute.observe(this) { route ->
             route?.let { newRoute ->
+                // 공간 인덱스 구축 (경로가 로드될 때)
+                pathSpatialIndex = PathSpatialIndex(newRoute.path)
+                Timber.d("Spatial index created for route with ${newRoute.path.size} points")
+
                 displayRoute(newRoute)
 
                 val wasRerouting = isRerouting
@@ -450,10 +634,19 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 if (wasRerouting) {
                     isRerouting = false
                     Toast.makeText(this, "경로를 재검색했습니다", Toast.LENGTH_SHORT).show()
-                    Timber.d("✅ Reroute completed, new route displayed")
+                    Timber.d("Reroute completed, new route displayed")
 
                     val referenceLocation = anchorLocation ?: newRoute.summary.startLocation
-                    currentPathIndex = findClosestPathPointAhead(referenceLocation, newRoute.path, 0)
+                    // 재탐색 후에도 가중치 기반 매칭 사용 (가능한 정보 활용)
+                    val rerouteBearing = if (lastBearing > 0f) lastBearing else null
+                    val rerouteSpeed = lastSpeedMps.coerceAtLeast(0f)
+                    currentPathIndex = findClosestPathPointWithWeight(
+                        currentLocation = referenceLocation,
+                        path = newRoute.path,
+                        currentIndex = 0,
+                        currentBearing = rerouteBearing,
+                        currentSpeed = rerouteSpeed
+                    )
                     val snappedLocation = newRoute.path.getOrElse(currentPathIndex) { newRoute.summary.startLocation }
                     updateCurrentLocationMarker(snappedLocation)
                     val bearing = calculateBearingFromPath(newRoute.path, currentPathIndex)
@@ -463,6 +656,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 // 속도 기반 카메라 상태 초기화
                 cameraSpeedInitialized = false
                 lastSpeedMps = 0f
+
+                // 칼만 필터 리셋 (새로운 경로 시작)
+                kalmanFilter.reset()
 
                 navigationManager.startNavigation(newRoute)
 
@@ -474,6 +670,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                         if (voiceGuideManager.isReady()) {
                             voiceGuideManager.speakInstruction(inst)
                         }
+                    } ?: run {
+                        newRoute.instructions.firstOrNull()?.let { inst ->
+                            updateInstructionUI(inst)
+                        }
                     }
                     pendingRerouteLocation = null
                 }
@@ -481,18 +681,18 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 // 최초 시작 시에만 출발지로 마커 초기화 (재탐색 시엔 현재 위치 유지)
                 if (!wasRerouting && isMapReady && currentLocationMarker != null) {
                     updateCurrentLocationMarker(newRoute.summary.startLocation)
-                    Timber.d("📍 Marker initialized to start location: ${newRoute.summary.startLocation}")
+                    Timber.d("Marker initialized to start location: ${newRoute.summary.startLocation}")
                 }
 
                 // 네비게이션 시작 시 즉시 3D 뷰로 전환
                 if (isMapReady) {
                     val currentLocation = navigationManager.navigationState.value?.currentLocation
                     if (currentLocation != null) {
-                        Timber.d("🗺️ Switching to 3D navigation view with current location")
+                        Timber.d("Switching to 3D navigation view with current location")
                         followRoute(currentLocation)
                     } else {
                         // 현재 위치가 없으면 출발지로 시작
-                        Timber.d("🗺️ Switching to 3D navigation view with start location")
+                        Timber.d("Switching to 3D navigation view with start location")
                         followRoute(route.summary.startLocation)
                     }
                 }
@@ -511,15 +711,218 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         }
 
         // 음성 안내 스위치 (기본값: ON)
-        binding.switchVoiceGuide.isChecked = true
+        binding.switchVoiceGuide.isChecked = isVoiceGuideEnabled
         binding.switchVoiceGuide.setOnCheckedChangeListener { _, isChecked ->
-            voiceGuideManager.setEnabled(isChecked)
-            Timber.d("🔊 Voice guide ${if (isChecked) "enabled" else "disabled"}")
+            if (suppressVoiceSwitchCallback) return@setOnCheckedChangeListener
+            updateVoiceGuideState(isChecked, fromUser = true)
+            Timber.d("Voice guide ${if (isChecked) "enabled" else "disabled"}")
+        }
+
+        binding.btnEnterPip.setOnClickListener {
+            enterPictureInPictureModeIfSupported()
         }
 
         // 현위치로 버튼 (제스처 모드에서만 표시)
         binding.btnReturnToCurrentLocation.setOnClickListener {
             returnToCurrentLocationMode()
+        }
+    }
+
+    private fun updateVoiceGuideState(enabled: Boolean, fromUser: Boolean) {
+        isVoiceGuideEnabled = enabled
+        voiceGuideManager.setEnabled(enabled)
+        if (binding.switchVoiceGuide.isChecked != enabled) {
+            suppressVoiceSwitchCallback = true
+            binding.switchVoiceGuide.isChecked = enabled
+            suppressVoiceSwitchCallback = false
+        }
+        if (!fromUser) {
+            Timber.d("Voice guide ${if (enabled) "enabled" else "disabled"} (synced)")
+        }
+        updatePictureInPictureParams()
+    }
+
+    private fun toggleVoiceGuideFromPip() {
+        runOnUiThread {
+            val newState = !isVoiceGuideEnabled
+            updateVoiceGuideState(newState, fromUser = false)
+            val toastMessage = if (newState) {
+                getString(R.string.pip_action_voice_on_description)
+            } else {
+                getString(R.string.pip_action_voice_off_description)
+            }
+            Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun supportsPictureInPicture(): Boolean {
+        return packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+    }
+
+    private fun buildPictureInPictureParams(): PictureInPictureParams? {
+        if (!supportsPictureInPicture()) return null
+
+        val stopIntent = PendingIntent.getBroadcast(
+            this,
+            REQUEST_CODE_PIP_STOP,
+            Intent(ACTION_PIP_STOP_NAVIGATION).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val stopAction = RemoteAction(
+            Icon.createWithResource(this, android.R.drawable.ic_media_pause),
+            getString(R.string.pip_action_stop_title),
+            getString(R.string.pip_action_stop_description),
+            stopIntent
+        )
+
+        val voiceIntent = PendingIntent.getBroadcast(
+            this,
+            REQUEST_CODE_PIP_TOGGLE_VOICE,
+            Intent(ACTION_PIP_TOGGLE_VOICE).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val voiceIconRes = if (isVoiceGuideEnabled) {
+            android.R.drawable.ic_lock_silent_mode_off
+        } else {
+            android.R.drawable.ic_lock_silent_mode
+        }
+        val voiceTitle = if (isVoiceGuideEnabled) {
+            getString(R.string.pip_action_voice_off_title)
+        } else {
+            getString(R.string.pip_action_voice_on_title)
+        }
+        val voiceDescription = if (isVoiceGuideEnabled) {
+            getString(R.string.pip_action_voice_off_description)
+        } else {
+            getString(R.string.pip_action_voice_on_description)
+        }
+        val voiceAction = RemoteAction(
+            Icon.createWithResource(this, voiceIconRes),
+            voiceTitle,
+            voiceDescription,
+            voiceIntent
+        )
+
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(9, 16))
+            .setActions(listOf(stopAction, voiceAction))
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val instructionText = binding.tvCurrentInstruction.text?.toString().orEmpty()
+            if (instructionText.isNotBlank()) {
+                builder.setTitle(instructionText)
+            }
+            val subtitle = buildPipSubtitle()
+            if (subtitle.isNotBlank()) {
+                builder.setSubtitle(subtitle)
+            }
+        }
+
+        return builder.build()
+    }
+
+    private fun updatePictureInPictureParams() {
+        if (!supportsPictureInPicture()) return
+        val params = buildPictureInPictureParams() ?: return
+        try {
+            setPictureInPictureParams(params)
+        } catch (e: IllegalStateException) {
+            Timber.w("Unable to update PIP params: ${e.message}")
+        }
+    }
+
+    private fun enterPictureInPictureModeIfSupported() {
+        if (!supportsPictureInPicture()) {
+            Toast.makeText(this, getString(R.string.pip_not_supported), Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (navigationManager.navigationState.value?.isNavigating != true) {
+            Toast.makeText(this, getString(R.string.pip_not_ready), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val params = buildPictureInPictureParams()
+        Timber.d("Entering Picture-in-Picture mode")
+        try {
+            if (params != null) {
+                enterPictureInPictureMode(params)
+            } else {
+                enterPictureInPictureMode()
+            }
+        } catch (e: IllegalStateException) {
+            Timber.e("Failed to enter PIP mode: ${e.message}")
+        }
+    }
+
+    private fun applyPictureInPictureUiState(isInPip: Boolean) {
+        isInPictureInPictureModeCompat = isInPip
+        if (isInPip) {
+            binding.btnEnterPip.visibility = View.GONE
+            binding.bottomPanel.visibility = View.GONE
+            binding.progressNavigation.visibility = View.GONE
+            binding.btnStopNavigation.visibility = View.GONE
+            binding.btnReturnToCurrentLocation.visibility = View.GONE
+            binding.tvCurrentSpeed.visibility = View.GONE
+        } else {
+            binding.btnEnterPip.visibility = View.VISIBLE
+            binding.bottomPanel.visibility = View.VISIBLE
+            binding.progressNavigation.visibility = View.VISIBLE
+            binding.btnStopNavigation.visibility =
+                if (navigationManager.navigationState.value?.isNavigating == true) View.VISIBLE else View.GONE
+            binding.btnReturnToCurrentLocation.visibility =
+                if (isGestureMode) View.VISIBLE else View.GONE
+            binding.tvCurrentSpeed.visibility = View.VISIBLE
+        }
+    }
+
+    private fun handlePictureInPictureModeChange(isInPip: Boolean) {
+        applyPictureInPictureUiState(isInPip)
+        if (isInPip) {
+            updatePictureInPictureParams()
+        } else {
+            navigationManager.navigationState.value?.let { updateNavigationUI(it) }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        handlePictureInPictureModeChange(isInPictureInPictureMode)
+    }
+
+    private fun buildPipSubtitle(): String {
+        val parts = mutableListOf<String>()
+        binding.tvRemainingDistance.text?.toString()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { parts.add(it) }
+        val voiceState = if (isVoiceGuideEnabled) {
+            getString(R.string.pip_voice_state_on)
+        } else {
+            getString(R.string.pip_voice_state_off)
+        }
+        parts.add(voiceState)
+        return parts.joinToString(" · ")
+    }
+
+    private fun registerPipActionReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(ACTION_PIP_STOP_NAVIGATION)
+            addAction(ACTION_PIP_TOGGLE_VOICE)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(pipActionReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(pipActionReceiver, filter)
+        }
+    }
+
+    private fun unregisterPipActionReceiver() {
+        try {
+            unregisterReceiver(pipActionReceiver)
+        } catch (e: IllegalArgumentException) {
+            Timber.w("PIP receiver already unregistered: ${e.message}")
         }
     }
 
@@ -553,6 +956,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         navigationViewModel.stopNavigation()
         cameraSpeedInitialized = false
         lastSpeedMps = 0f
+        updateSpeedDisplay(null)
+
+        // 칼만 필터 리셋
+        kalmanFilter.reset()
+
+        // 공간 인덱스 리셋
+        pathSpatialIndex = null
 
         // 액티비티 종료
         finish()
@@ -571,7 +981,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             isGestureMode = true
             lastGestureTime = currentTime
             enterGestureMode()
-            Timber.d("🎯 User gesture detected - entering gesture mode")
+            Timber.d("User gesture detected - entering gesture mode")
         } else {
             // 제스처 모드가 이미 활성화된 경우 시간 갱신
             lastGestureTime = currentTime
@@ -598,29 +1008,29 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 10초 후 자동 복귀 타이머 시작
         startGestureTimeoutTimer()
 
-        Timber.d("🎯 Entered gesture mode - congestion display enabled, auto tracking disabled")
+        Timber.d("Entered gesture mode - congestion display enabled, auto tracking disabled")
     }
 
     /**
      * 현재 위치 모드로 복귀
      */
     private fun returnToCurrentLocationMode() {
-        Timber.d("🎯 returnToCurrentLocationMode() called")
-        Timber.d("🎯 Current state - isGestureMode: $isGestureMode, isNavigating: ${navigationManager.navigationState.value?.isNavigating}, currentLocation: ${navigationManager.navigationState.value?.currentLocation}")
+        Timber.d("returnToCurrentLocationMode() called")
+        Timber.d("Current state - isGestureMode: $isGestureMode, isNavigating: ${navigationManager.navigationState.value?.isNavigating}, currentLocation: ${navigationManager.navigationState.value?.currentLocation}")
 
         isGestureMode = false
 
         // 단색 경로로 복귀
         navigationManager.navigationState.value?.currentRoute?.let { route ->
             displayRoute(route)
-            Timber.d("🎯 Route displayed (single color)")
+            Timber.d("Route displayed (single color)")
         }
 
         // 네비게이션 모드 재활성화 (수동 카메라 제어로 복귀)
         // 네비게이션 중이면 자동으로 startNavigationMode()가 호출되므로 여기서는 명시적으로 호출
         if (navigationManager.navigationState.value?.isNavigating == true) {
             startNavigationMode()
-            Timber.d("🎯 Navigation mode reactivated")
+            Timber.d("Navigation mode reactivated")
         }
 
         // UI 업데이트
@@ -631,19 +1041,19 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         val currentRoute = navigationManager.navigationState.value?.currentRoute
 
         if (currentLocation != null && naverMap != null) {
-            Timber.d("🎯 Moving camera to current location: $currentLocation")
+            Timber.d("Moving camera to current location: $currentLocation")
 
             val bearing = if (lastNavigationBearing > 0) {
-                Timber.d("🎯 Using last navigation bearing: $lastNavigationBearing")
+                Timber.d("Using last navigation bearing: $lastNavigationBearing")
                 lastNavigationBearing
             } else {
                 // 방향이 없으면 경로 기반으로 계산
                 if (currentRoute != null && currentPathIndex < currentRoute.path.size - 1) {
                     val pathBearing = calculateBearingFromPath(currentRoute.path, currentPathIndex)
-                    Timber.d("🎯 Calculated bearing from path: $pathBearing")
+                    Timber.d("Calculated bearing from path: $pathBearing")
                     pathBearing
                 } else {
-                    Timber.d("🎯 Using last bearing: $lastBearing")
+                    Timber.d("Using last bearing: $lastBearing")
                     lastBearing
                 }
             }
@@ -659,7 +1069,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 .animate(CameraAnimation.Easing, 200)
             naverMap?.moveCamera(cameraUpdate)
 
-            Timber.d("🎯 Camera moved to current location - zoom=${lastNavigationZoom}, bearing=$bearing°")
+            Timber.d("Camera moved to current location - zoom=${lastNavigationZoom}, bearing=$bearing°")
         } else {
             // 현재 위치가 없으면 경로의 시작점으로 이동
             if (currentRoute != null && naverMap != null) {
@@ -669,7 +1079,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     currentRoute.summary.startLocation
                 }
 
-                Timber.w("⚠️ Current location is null, using route location: $startLocation")
+                Timber.w("Current location is null, using route location: $startLocation")
 
                 val bearing = if (lastNavigationBearing > 0) {
                     lastNavigationBearing
@@ -690,14 +1100,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     .animate(CameraAnimation.Easing, 200)
                 naverMap?.moveCamera(cameraUpdate)
 
-                Timber.d("🎯 Camera moved to route location: $startLocation")
+                Timber.d("Camera moved to route location: $startLocation")
             } else {
-                Timber.e("❌ Cannot return to location - currentLocation: null, currentRoute: ${currentRoute != null}, naverMap: ${naverMap != null}")
+                Timber.e(" Cannot return to location - currentLocation: null, currentRoute: ${currentRoute != null}, naverMap: ${naverMap != null}")
                 Toast.makeText(this, "현재 위치를 가져올 수 없습니다. GPS를 확인해주세요.", Toast.LENGTH_SHORT).show()
             }
         }
 
-        Timber.d("🎯 Returned to current location mode complete")
+        Timber.d("Returned to current location mode complete")
     }
 
     /**
@@ -706,7 +1116,18 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private fun startGestureTimeoutTimer() {
         // 기존 타이머가 있다면 취소하고 새로 시작
         // 실제 구현에서는 Handler나 Timer를 사용할 수 있지만, 여기서는 간단히 로그만
-        Timber.d("🎯 Gesture timeout timer started (${GESTURE_TIMEOUT}ms)")
+        Timber.d("Gesture timeout timer started (${GESTURE_TIMEOUT}ms)")
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!isInPictureInPictureModeCompat &&
+            supportsPictureInPicture() &&
+            navigationManager.navigationState.value?.isNavigating == true
+        ) {
+            Timber.d("onUserLeaveHint → enter PIP")
+            enterPictureInPictureModeIfSupported()
+        }
     }
 
     private fun checkLocationPermission() {
@@ -714,14 +1135,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             this,
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
-        Timber.d("📍 checkLocationPermission() - hasPermission: $hasPermission")
+        Timber.d("checkLocationPermission() - hasPermission: $hasPermission")
 
         if (!hasPermission) {
-            Timber.d("📍 Requesting location permission")
+            Timber.d("Requesting location permission")
             requestLocationPermission()
         } else {
             // 권한이 이미 허용된 경우 위치 업데이트 시작
-            Timber.d("📍 Permission already granted, starting location updates")
+            Timber.d("Permission already granted, starting location updates")
             startLocationUpdates()
         }
     }
@@ -743,11 +1164,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                Timber.d("📍 Location permission granted")
+                Timber.d("Location permission granted")
                 // 권한이 허용되면 위치 업데이트 시작
                 startLocationUpdates()
             } else {
-                Timber.w("📍 Location permission denied")
+                Timber.w("Location permission denied")
                 // 권한이 거부되면 에러 메시지 표시
                 binding.tvCurrentInstruction.text = "위치 권한이 필요합니다. 설정에서 권한을 허용해주세요."
             }
@@ -759,11 +1180,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      */
     @RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun startLocationUpdates() {
-        Timber.d("📍 startLocationUpdates() using Fused if available")
+        Timber.d("startLocationUpdates() using Fused if available")
         // 우선 Fused 사용 시도
         val started = startFusedLocationUpdates()
         if (!started) {
-            Timber.w("📍 Fused start failed → fallback to LocationManager")
+            Timber.w("Fused start failed → fallback to LocationManager")
             startLocationUpdatesLegacy()
         }
     }
@@ -783,12 +1204,19 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     override fun onLocationResult(result: LocationResult) {
                         val loc = result.lastLocation ?: return
                         val nowMono = SystemClock.elapsedRealtime()
-                        val latLng = LatLng(loc.latitude, loc.longitude)
+
+                        // 칼만 필터 적용
+                        val (filteredLat, filteredLng) = kalmanFilter.update(
+                            measuredLat = loc.latitude,
+                            measuredLng = loc.longitude,
+                            accuracy = loc.accuracy
+                        )
+                        val latLng = LatLng(filteredLat, filteredLng)
 
                         // GPS 신호 복구 처리
                         if (isInTunnel) {
                             isInTunnel = false
-                            Timber.d("🌞 GPS signal restored (Fused) - exiting tunnel mode")
+                            Timber.d("GPS signal restored (Fused) - exiting tunnel mode")
                             maybeToast("GPS 신호 복구됨")
                         }
 
@@ -799,19 +1227,22 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                             lastStoppedElapsedMs = nowMono
                         }
                         lastSpeedMps = smoothCameraSpeed(loc.speed)
+                        updateSpeedDisplay(lastSpeedMps)
+
+                        updateAccuracyState(loc.accuracy)
 
                         val stableBearing = navigationManager.calculateStableBearing(loc)
                         if (stableBearing > 0f) {
                             lastBearing = stableBearing
-                            Timber.d("🧭 Stable bearing updated: ${stableBearing}° (speed: ${loc.speed}m/s)")
+                            Timber.d("Stable bearing updated: ${stableBearing}° (speed: ${loc.speed}m/s)")
                         } else if (loc.hasBearing() && loc.hasSpeed() && loc.speed > 1.0f && loc.bearingAccuracyDegrees <= 90f) {
                             lastBearing = loc.bearing
-                            Timber.d("🧭 Fallback GPS bearing used: ${loc.bearing}°")
+                            Timber.d("Fallback GPS bearing used: ${loc.bearing}°")
                         }
                         lastLocation = loc
                         updateCurrentLocation(latLng)
                         maybeSendTelemetry(loc)
-                        Timber.d("📍 Fused location: $latLng, bearing=${loc.bearing}°, speed=${loc.speed}m/s acc=${loc.accuracy}m")
+                        Timber.d("Fused location: $latLng, bearing=${loc.bearing}°, speed=${loc.speed}m/s acc=${loc.accuracy}m")
                     }
                 }
             }
@@ -821,21 +1252,27 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             // 마지막 알려진 위치 즉시 반영
             fusedClient.lastLocation.addOnSuccessListener { loc ->
                 loc?.let {
-                    val latLng = LatLng(it.latitude, it.longitude)
+                    // 칼만 필터 적용
+                    val (filteredLat, filteredLng) = kalmanFilter.update(
+                        measuredLat = it.latitude,
+                        measuredLng = it.longitude,
+                        accuracy = it.accuracy
+                    )
+                    val latLng = LatLng(filteredLat, filteredLng)
                     lastKnownLocation = latLng
                     lastLocationUpdateTime = System.currentTimeMillis()
                     lastFixElapsedMs = SystemClock.elapsedRealtime()
                     updateCurrentLocation(latLng)
-                    Timber.d("📍 Fused last known location: $latLng")
+                    Timber.d("Fused last known location (filtered): $latLng")
                 }
             }
-            Timber.d("📍 Fused location updates started")
+            Timber.d("Fused location updates started")
             true
         } catch (e: SecurityException) {
-            Timber.e("📍 Fused permission error: ${e.message}")
+            Timber.e("Fused permission error: ${e.message}")
             false
         } catch (e: Exception) {
-            Timber.e("📍 Error starting fused updates: ${e.message}")
+            Timber.e("Error starting fused updates: ${e.message}")
             false
         }
     }
@@ -843,7 +1280,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     /** 기존 LocationManager 기반 업데이트 (폴백) */
     @RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun startLocationUpdatesLegacy() {
-        Timber.d("📍 startLocationUpdates() called")
+        Timber.d("startLocationUpdates() called")
 
         try {
             val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
@@ -853,10 +1290,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             val isNetworkEnabled =
                 locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
 
-            Timber.d("📍 GPS enabled: $isGpsEnabled, Network enabled: $isNetworkEnabled")
+            Timber.d("GPS enabled: $isGpsEnabled, Network enabled: $isNetworkEnabled")
 
             if (!isGpsEnabled && !isNetworkEnabled) {
-                Timber.w("📍 Both GPS and Network are disabled")
+                Timber.w("Both GPS and Network are disabled")
                 binding.tvCurrentInstruction.text = "위치 서비스가 비활성화되어 있습니다. 설정에서 GPS를 켜주세요."
                 return
             }
@@ -868,7 +1305,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 LocationManager.NETWORK_PROVIDER
             }
 
-            Timber.d("📍 Using location provider: $provider")
+            Timber.d("Using location provider: $provider")
 
             // 위치 업데이트 요청
             locationManager.requestLocationUpdates(
@@ -878,30 +1315,36 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 locationListener
             )
 
-            Timber.d("📍 Location updates requested from provider: $provider")
+            Timber.d("Location updates requested from provider: $provider")
 
             // 마지막 알려진 위치로 즉시 업데이트
             val lastKnownLocation = locationManager.getLastKnownLocation(provider)
             if (lastKnownLocation != null) {
-                val latLng = LatLng(lastKnownLocation.latitude, lastKnownLocation.longitude)
+                // 칼만 필터 적용
+                val (filteredLat, filteredLng) = kalmanFilter.update(
+                    measuredLat = lastKnownLocation.latitude,
+                    measuredLng = lastKnownLocation.longitude,
+                    accuracy = lastKnownLocation.accuracy
+                )
+                val latLng = LatLng(filteredLat, filteredLng)
                 this.lastKnownLocation = latLng
                 lastLocationUpdateTime = System.currentTimeMillis()
                 lastFixElapsedMs = SystemClock.elapsedRealtime()
                 updateCurrentLocation(latLng)
-                Timber.d("📍 Using last known location: $latLng")
+                Timber.d("Using last known location (filtered): $latLng")
             } else {
-                Timber.w("📍 No last known location available")
+                Timber.w("No last known location available")
                 // 초기 시간 설정
                 lastLocationUpdateTime = System.currentTimeMillis()
                 lastFixElapsedMs = SystemClock.elapsedRealtime()
             }
 
-            Timber.d("📍 Legacy LocationManager updates started successfully")
+            Timber.d("Legacy LocationManager updates started successfully")
         } catch (e: SecurityException) {
-            Timber.e("📍 Location permission not granted: ${e.message}")
+            Timber.e("Location permission not granted: ${e.message}")
             binding.tvCurrentInstruction.text = "위치 권한이 필요합니다."
         } catch (e: Exception) {
-            Timber.e("📍 Error starting location updates: ${e.message}")
+            Timber.e("Error starting location updates: ${e.message}")
             binding.tvCurrentInstruction.text = "위치 업데이트 중 오류가 발생했습니다."
         }
     }
@@ -915,12 +1358,19 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         override fun onLocationChanged(location: Location) {
             try {
                 val nowMono = SystemClock.elapsedRealtime()
-                val latLng = LatLng(location.latitude, location.longitude)
+
+                // 칼만 필터 적용
+                val (filteredLat, filteredLng) = kalmanFilter.update(
+                    measuredLat = location.latitude,
+                    measuredLng = location.longitude,
+                    accuracy = location.accuracy
+                )
+                val latLng = LatLng(filteredLat, filteredLng)
 
                 // GPS 신호 복구 확인
                 if (isInTunnel) {
                     isInTunnel = false
-                    Timber.d("🌞 GPS signal restored - exiting tunnel mode")
+                    Timber.d("GPS signal restored - exiting tunnel mode")
                     Toast.makeText(this@NavigationActivity, "GPS 신호 복구됨", Toast.LENGTH_SHORT).show()
                 }
 
@@ -933,37 +1383,40 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 }
 
                 // GPS bearing을 사용하여 방향 업데이트 (실제 이동 방향 반영)
+                updateAccuracyState(location.accuracy)
+
                 val stableBearing = navigationManager.calculateStableBearing(location)
                 if (stableBearing > 0f) {
                     lastBearing = stableBearing
-                    Timber.d("🧭 Stable bearing updated (legacy): ${stableBearing}° (speed: ${location.speed}m/s)")
+                    Timber.d("Stable bearing updated (legacy): ${stableBearing}° (speed: ${location.speed}m/s)")
                 } else if (location.hasBearing() && location.hasSpeed() && location.speed > 1.0f) {
                     // 속도가 1m/s 이상일 때만 GPS bearing 사용 (정지 시 방향 변경 방지)
                     lastBearing = location.bearing
-                    Timber.d("🧭 GPS bearing fallback: ${location.bearing}° (speed: ${location.speed}m/s)")
+                    Timber.d("GPS bearing fallback: ${location.bearing}° (speed: ${location.speed}m/s)")
                 }
                 lastSpeedMps = smoothCameraSpeed(location.speed)
+                updateSpeedDisplay(lastSpeedMps)
 
                 lastLocation = location
                 updateCurrentLocation(latLng)
                 maybeSendTelemetry(location)
-                Timber.d("📍 Location updated: $latLng, bearing: ${location.bearing}°, speed: ${location.speed}m/s")
+                Timber.d("Location updated: $latLng, bearing: ${location.bearing}°, speed: ${location.speed}m/s")
             } catch (e: Exception) {
-                Timber.e("❌ Error in locationListener: ${e.message}")
+                Timber.e(" Error in locationListener: ${e.message}")
                 e.printStackTrace()
             }
         }
 
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {
-            Timber.d("📍 Location status changed: $provider, status: $status")
+            Timber.d("Location status changed: $provider, status: $status")
         }
 
         override fun onProviderEnabled(provider: String) {
-            Timber.d("📍 Location provider enabled: $provider")
+            Timber.d("Location provider enabled: $provider")
         }
 
         override fun onProviderDisabled(provider: String) {
-            Timber.w("📍 Location provider disabled: $provider")
+            Timber.w("Location provider disabled: $provider")
         }
     }
 
@@ -990,7 +1443,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             // 안내까지 남은 거리 실시간 갱신
             refreshInstructionDistance()
         } catch (e: Exception) {
-            Timber.e("❌ Error updating current location: ${e.message}")
+            Timber.e(" Error updating current location: ${e.message}")
             e.printStackTrace()
         }
     }
@@ -1031,6 +1484,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         Timber.d("🚇 DR: v=%.2f m/s (ema), t=%.1f s, d=%.1f m (cap=%.1f m)"
             .format(speedMps, elapsedSec, estimatedDistance, remaining))
+
+        updateSpeedDisplay(speedMps)
 
         // 선분 보간으로 추정 위치 계산
         val (estIndex, estPos) = advanceAlongPath(safeStartIdx, path, estimatedDistance)
@@ -1202,7 +1657,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 //        // 패딩을 좀 더 크게 설정하여 경로가 잘리지 않도록 함
 //        nMap.moveCamera(CameraUpdate.fitBounds(bounds, 1000))
 
-        Timber.d("🗺️ Route displayed with ${route.path.size} points (single color)")
+        Timber.d("Route displayed with ${route.path.size} points (single color)")
     }
 
     /**
@@ -1237,7 +1692,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                         // 첫 섹션과 같은 혼잡도로 처리하거나 기본값 사용
                         val firstCongestion = section.congestion
                         groupedPaths.add(Pair(beforePath, firstCongestion))
-                        Timber.d("📍 Added pre-section path: 0-$startIndex, congestion=$firstCongestion")
+                        Timber.d("Added pre-section path: 0-$startIndex, congestion=$firstCongestion")
                     }
                 }
 
@@ -1258,7 +1713,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                             currentPathGroup = gapPath.toMutableList()
                             currentCongestion = gapCongestion
                             groupedPaths.add(Pair(gapPath, gapCongestion))
-                            Timber.d("📍 Added gap path: $lastEndIndex-$startIndex, congestion=$gapCongestion")
+                            Timber.d("Added gap path: $lastEndIndex-$startIndex, congestion=$gapCongestion")
                             currentPathGroup.clear()
                             currentCongestion = null
                         }
@@ -1281,7 +1736,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 }
 
                 lastEndIndex = endIndex
-                Timber.d("📍 Section: ${section.name}, pointIndex=$startIndex-$endIndex, congestion=${section.congestion}")
+                Timber.d("Section: ${section.name}, pointIndex=$startIndex-$endIndex, congestion=${section.congestion}")
             }
 
             // 마지막 그룹 저장
@@ -1297,7 +1752,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     val lastCongestion =
                         currentCongestion ?: sortedSections.lastOrNull()?.congestion ?: 0
                     groupedPaths.add(Pair(remainingPath, lastCongestion))
-                    Timber.d("📍 Added post-section path: $lastEndIndex-${route.path.size}, congestion=$lastCongestion")
+                    Timber.d("Added post-section path: $lastEndIndex-${route.path.size}, congestion=$lastCongestion")
                 }
             }
 
@@ -1313,7 +1768,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 pathOverlays.add(pathOverlay)
             }
 
-            Timber.d("🗺️ Total segments: ${groupedPaths.size}, Total points: ${route.path.size}")
+            Timber.d("Total segments: ${groupedPaths.size}, Total points: ${route.path.size}")
         } else {
             // sections가 없으면 전체 경로를 하나로 표시
             val pathOverlay = PathOverlay().apply {
@@ -1348,7 +1803,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 //
 //        nMap.moveCamera(CameraUpdate.fitBounds(bounds, 100))
 
-        Timber.d("🗺️ Route displayed with ${route.path.size} points, ${pathOverlays.size} segments by congestion")
+        Timber.d("Route displayed with ${route.path.size} points, ${pathOverlays.size} segments by congestion")
     }
 
     /**
@@ -1367,12 +1822,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     }
 
     private fun updateNavigationUI(state: NavigationState) {
-        // 네비게이션 중이면 중지 버튼만 표시 (시작 버튼은 없음 - 자동 시작)
-        binding.btnStopNavigation.visibility = if (state.isNavigating) View.VISIBLE else View.GONE
+        if (!isInPictureInPictureModeCompat) {
+            // 네비게이션 중이면 중지 버튼만 표시 (시작 버튼은 없음 - 자동 시작)
+            binding.btnStopNavigation.visibility = if (state.isNavigating) View.VISIBLE else View.GONE
 
-        // 현위치로 버튼은 제스처 모드에서만 표시
-        binding.btnReturnToCurrentLocation.visibility =
-            if (isGestureMode) View.VISIBLE else View.GONE
+            // 현위치로 버튼은 제스처 모드에서만 표시
+            binding.btnReturnToCurrentLocation.visibility =
+                if (isGestureMode) View.VISIBLE else View.GONE
+        }
 
         // 진행률 업데이트
         binding.progressNavigation.progress = (state.progress * 100).toInt()
@@ -1396,7 +1853,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         }
 
         // 디버깅 로그
-        Timber.d("📊 UI Update:")
+        Timber.d("UI Update:")
         Timber.d(
             "   Remaining Distance: ${state.remainingDistance}m (${
                 String.format(
@@ -1539,7 +1996,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      */
     private fun createCurrentLocationMarker() {
         val map = naverMap ?: run {
-            Timber.w("📍 NaverMap is null, cannot create marker")
+            Timber.w("NaverMap is null, cannot create marker")
             return
         }
 
@@ -1553,8 +2010,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             width = 150
             height = 150
         }
-        Timber.d("📍 Current location marker created at: ${currentLocationMarker?.position}")
-        Timber.d("📍 Marker map: ${currentLocationMarker?.map}, visible: ${currentLocationMarker?.map != null}")
+        Timber.d("Current location marker created at: ${currentLocationMarker?.position}")
+        Timber.d("Marker map: ${currentLocationMarker?.map}, visible: ${currentLocationMarker?.map != null}")
     }
 
     /**
@@ -1562,7 +2019,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      */
     private fun updateCurrentLocationMarker(location: LatLng) {
         if (currentLocationMarker == null) {
-            Timber.w("📍 Current location marker is null, creating new one")
+            Timber.w("Current location marker is null, creating new one")
             createCurrentLocationMarker()
         }
 
@@ -1575,7 +2032,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             // 마커가 항상 보이도록 zIndex 업데이트
             marker.zIndex = 10000
 
-            Timber.d("📍 Current location marker updated:")
+            Timber.d("Current location marker updated:")
             Timber.d("   Old position: $oldPosition")
             Timber.d("   New position: $location")
             Timber.d("   Marker position: ${marker.position}")
@@ -1583,7 +2040,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             Timber.d("   Marker zIndex: ${marker.zIndex}")
             Timber.d("   Marker visible: ${marker.map != null}")
         } ?: run {
-            Timber.e("📍 Failed to update current location marker - marker is null")
+            Timber.e("Failed to update current location marker - marker is null")
         }
     }
 
@@ -1596,7 +2053,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 마커의 angle은 0도로 유지 (항상 위쪽 향함)
         currentLocationMarker?.let { marker ->
             marker.angle = 0f
-            Timber.d("🧭 Marker angle set to 0 (map will rotate instead)")
+            Timber.d("Marker angle set to 0 (map will rotate instead)")
         }
     }
 
@@ -1624,7 +2081,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         naverMap?.let { map ->
             val cameraUpdate = CameraUpdate.scrollTo(location)
             map.moveCamera(cameraUpdate)
-            Timber.d("🗺️ Map moved to current location: $location")
+            Timber.d("Map moved to current location: $location")
         }
     }
 
@@ -1668,7 +2125,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     bearing = calculateBearingFromPath(route.path, currentPathIndex)
                     if (bearing > 0) {
                         lastBearing = bearing
-                        Timber.d("🧭 Using route bearing: $bearing°")
+                        Timber.d("Using route bearing: $bearing°")
                     }
                 }
             }
@@ -1694,7 +2151,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     .animate(CameraAnimation.Easing, 200)
                 map.moveCamera(cameraUpdate)
 
-                Timber.d("🗺️ Navigation view: location=$location, GPS bearing=$bearing°, zoom=$lastNavigationZoom")
+                Timber.d("Navigation view: location=$location, GPS bearing=$bearing°, zoom=$lastNavigationZoom")
             } else {
                 // 기본 뷰 (bearing 없을 때)
                 val (targetZoom, targetTilt) = getAdaptiveCameraParams()
@@ -1711,7 +2168,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
                     .animate(CameraAnimation.Easing, 200)
                 map.moveCamera(cameraUpdate)
-                Timber.d("🗺️ Navigation view (default): location=$location, no bearing")
+                Timber.d("Navigation view (default): location=$location, no bearing")
             }
         }
     }
@@ -1758,7 +2215,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     .animate(CameraAnimation.Easing, 200)
                 map.moveCamera(cameraUpdate)
 
-                Timber.d("🗺️ Navigation view (lagged bearing): location=$location, bearing=$smoothedBearing° (target=$bearing°)")
+                Timber.d("Navigation view (lagged bearing): location=$location, bearing=$smoothedBearing° (target=$bearing°)")
             }
         }
     }
@@ -1795,53 +2252,240 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     /**
      * 경로상의 가장 가까운 포인트 찾기 (이전 인덱스 고려하여 앞으로만 검색)
      * 경로의 선분들에 대한 최단 거리를 계산하여 더 정확한 위치 찾기
+     *
+     * @deprecated Use findClosestPathPointWithWeight instead for better accuracy
      */
     private fun findClosestPathPointAhead(
         currentLocation: LatLng,
         path: List<LatLng>,
         currentIndex: Int
     ): Int {
+        // 기본값으로 가중치 기반 메서드 호출 (하위 호환성)
+        return findClosestPathPointWithWeight(
+            currentLocation = currentLocation,
+            path = path,
+            currentIndex = currentIndex,
+            currentBearing = null,
+            currentSpeed = 0f
+        )
+    }
+
+    /**
+     * 가중치 기반 경로 매칭 (T맵 스타일)
+     * 거리, 진행 방향, 속도, 진행률을 종합적으로 고려하여 최적의 경로상 위치를 찾습니다.
+     * 공간 인덱싱을 사용하여 성능을 최적화합니다.
+     *
+     * @param currentLocation 현재 GPS 위치
+     * @param path 경로 포인트 리스트
+     * @param currentIndex 현재 경로 인덱스
+     * @param currentBearing 현재 이동 방향 (도, 0-360), null이면 방향 점수 제외
+     * @param currentSpeed 현재 속도 (m/s)
+     * @return 최적의 경로상 인덱스
+     */
+    private fun findClosestPathPointWithWeight(
+        currentLocation: LatLng,
+        path: List<LatLng>,
+        currentIndex: Int,
+        currentBearing: Float?,
+        currentSpeed: Float
+    ): Int {
         try {
             if (path.isEmpty()) return 0
             if (path.size < 2) return currentIndex.coerceIn(0, path.size - 1)
             if (currentIndex < 0 || currentIndex >= path.size) return 0
 
-            var minDistance = Float.MAX_VALUE
-            var closestIndex = currentIndex
+            // 먼저 현재 위치에서 가장 가까운 경로 지점을 찾아서 거리 확인
+            var minDistanceToPath = Float.MAX_VALUE
+            var closestPointIndex = currentIndex
+            for (i in 0 until path.size) {
+                val dist = calculateDistance(currentLocation, path[i])
+                if (dist < minDistanceToPath) {
+                    minDistanceToPath = dist
+                    closestPointIndex = i
+                }
+            }
 
-            // 현재 인덱스부터 앞으로 일정 범위만 검색 (과거로 돌아가지 않음)
-            val searchEnd = minOf(currentIndex + 100, path.size)  // 최대 100개 포인트만 검색
+            // 경로 이탈 정도에 따라 검색 범위 동적 조정
+            val isFarFromPath = minDistanceToPath > 100f  // 100m 이상 떨어져 있으면 "멀리 이탈"
+            val isVeryFarFromPath = minDistanceToPath > 60f  // 60m 이상 떨어져 있으면 "매우 멀리 이탈" (즉시 재탐색)
 
-            // 경로상의 선분들에 대한 최단 거리 계산
-            for (i in currentIndex until searchEnd - 1) {
+            // 속도 기반 기본 검색 범위 (고속도로 대응)
+            val baseSearchRange = when {
+                currentSpeed > 33.3f -> 500  // 초고속 (120km/h 이상): 매우 넓은 범위
+                currentSpeed > 27.8f -> 400  // 고속 (100km/h 이상): 넓은 범위
+                currentSpeed > 13.9f -> 200  // 중고속 (50km/h 이상): 넓은 범위
+                currentSpeed > 4.2f -> 100   // 중속 (15km/h 이상): 기본 범위
+                else -> 50                   // 저속: 좁은 범위
+            }
+
+            // 경로 이탈 시 검색 범위 확대
+            val searchRange = when {
+                isVeryFarFromPath -> path.size  // 매우 멀리 이탈 시 전체 경로 검색
+                isFarFromPath -> baseSearchRange * 3  // 멀리 이탈 시 3배 확대
+                else -> baseSearchRange
+            }
+
+            // 공간 인덱싱 사용 여부 결정
+            val useSpatialIndex = pathSpatialIndex?.isAvailable() == true && path.size >= 100
+
+            // 검색할 인덱스 범위 결정
+            val searchIndices = if (useSpatialIndex) {
+                // 공간 인덱스를 사용하여 근접 포인트만 검색
+                val radiusMeters = when {
+                    isVeryFarFromPath -> 1000.0  // 매우 멀리 이탈 시 1km 반경
+                    isFarFromPath -> 700.0  // 멀리 이탈 시 700m 반경
+                    currentSpeed > 33.3f -> 1000.0  // 초고속 (120km/h 이상): 1km 반경
+                    currentSpeed > 27.8f -> 800.0  // 고속 (100km/h 이상): 800m 반경
+                    currentSpeed > 13.9f -> 500.0  // 중고속 (50km/h 이상): 500m 반경
+                    currentSpeed > 4.2f -> 300.0  // 중속: 300m 반경
+                    else -> 150.0                  // 저속: 150m 반경
+                }
+                val nearbyIndices = pathSpatialIndex!!.findNearbyPoints(
+                    center = currentLocation,
+                    radiusMeters = radiusMeters,
+                    startIndex = if (isVeryFarFromPath || isFarFromPath) 0 else currentIndex  // 멀리 이탈 시 시작 인덱스 제한 없음
+                )
+                // 경로 이탈 시에는 검색 범위 제한 없음
+                if (isVeryFarFromPath || isFarFromPath) {
+                    nearbyIndices
+                } else {
+                    val maxIndex = minOf(currentIndex + baseSearchRange, path.size)
+                    nearbyIndices.filter { it in currentIndex until maxIndex }
+                }
+            } else {
+                // 기존 방식: 순차 검색
+                if (isVeryFarFromPath || isFarFromPath) {
+                    // 멀리 이탈 시 전체 경로 검색
+                    (0 until path.size).toList()
+                } else {
+                    (currentIndex until minOf(currentIndex + searchRange, path.size)).toList()
+                }
+            }
+
+            val searchEnd = if (isVeryFarFromPath || isFarFromPath) path.size else minOf(currentIndex + searchRange, path.size)
+
+            var bestScore = Float.MAX_VALUE
+            var bestIndex = closestPointIndex  // 초기값을 가장 가까운 지점으로 설정
+
+            Timber.d("Weighted path matching: speed=${currentSpeed}m/s, bearing=${currentBearing}°, distanceToPath=${minDistanceToPath.toInt()}m, range=$searchRange, spatialIndex=${if (useSpatialIndex) "ON" else "OFF"}, candidates=${searchIndices.size}, farFromPath=$isFarFromPath")
+
+            // 경로상의 선분들에 대한 가중치 점수 계산
+            // 공간 인덱스를 사용하면 후보 인덱스만 검색, 아니면 기존 방식
+            val indicesToCheck = if (useSpatialIndex) {
+                searchIndices.filter { it < path.size - 1 }  // 선분 검색을 위해 마지막 인덱스 제외
+            } else {
+                (0 until searchEnd - 1).toList()  // 경로 이탈 시 전체 검색
+            }
+
+            for (i in indicesToCheck) {
                 val p1 = path.getOrNull(i) ?: continue
                 val p2 = path.getOrNull(i + 1) ?: continue
 
-                // 선분에 대한 최단 거리 계산
+                // 1. 거리 점수 (가까울수록 좋음) - 가중치: 1.0
                 val distanceToSegment = distanceToLineSegment(currentLocation, p1, p2)
+                val distanceScore = distanceToSegment * 1.0f
 
-                if (distanceToSegment < minDistance) {
-                    minDistance = distanceToSegment
+                // 2. 진행 방향 점수 (방향이 맞을수록 좋음) - 가중치: 0.1
+                val directionScore = if (currentBearing != null && currentBearing > 0f) {
+                    val pathBearing = calculateBearing(p1, p2)
+                    val bearingDiff = abs(shortestAngleDiff(currentBearing, pathBearing))
+                    // 방향 차이가 클수록 페널티 (0-180도 범위)
+                    bearingDiff * 0.1f
+                } else {
+                    0f
+                }
+
+                // 3. 진행률 점수 (뒤로 가면 페널티) - 거리 기반으로 조정
+                // 경로에서 멀리 떨어져 있으면 뒤로 가는 것에 대한 페널티를 줄임
+                val progressScore = if (i < currentIndex) {
+                    val penaltyMultiplier = when {
+                        isVeryFarFromPath -> 0.5f  // 매우 멀리 이탈 시 페널티 50% 감소
+                        isFarFromPath -> 1.0f  // 멀리 이탈 시 페널티 유지
+                        distanceToSegment > 100f -> 1.5f  // 선분에서 멀면 페널티 약간 증가
+                        else -> 10.0f  // 가까우면 기존처럼 큰 페널티
+                    }
+                    (currentIndex - i) * penaltyMultiplier
+                } else {
+                    0f
+                }
+
+                // 4. 속도 기반 보너스 (고속일 때 가까운 경로에 보너스) - 고속도로 대응
+                val speedBonus = when {
+                    // 초고속 (120km/h 이상)에서는 더 넓은 범위에서 보너스
+                    currentSpeed > 33.3f && distanceToSegment < 150f -> -8f  // 초고속 + 가까우면 큰 보너스
+                    currentSpeed > 27.8f && distanceToSegment < 120f -> -6f  // 고속 (100km/h 이상) + 가까우면 보너스
+                    currentSpeed > 10f && distanceToSegment < 100f -> -5f  // 중고속 + 가까우면 보너스
+                    currentSpeed < 1f && distanceToSegment > 50f -> 20f  // 정지 중 + 멀면 페널티
+                    else -> 0f
+                }
+
+                // 5. 선분 길이 고려 (짧은 선분은 더 정확하게 매칭)
+                val segmentLength = calculateDistance(p1, p2)
+                val segmentLengthBonus = if (segmentLength < 10f && distanceToSegment < 20f) {
+                    -2f  // 짧은 선분 + 가까우면 보너스
+                } else {
+                    0f
+                }
+
+                val totalScore = distanceScore + directionScore + progressScore + speedBonus + segmentLengthBonus
+
+                if (totalScore < bestScore) {
+                    bestScore = totalScore
                     // 선분에 가장 가까운 지점이 p1에 가까우면 i, p2에 가까우면 i+1
                     val distToP1 = calculateDistance(currentLocation, p1)
                     val distToP2 = calculateDistance(currentLocation, p2)
-                    closestIndex = if (distToP1 < distToP2) i else i + 1
+                    bestIndex = if (distToP1 < distToP2) i else i + 1
                 }
             }
 
             // 경로상의 점들과의 직접 거리도 확인 (더 정확한 매칭을 위해)
-            for (i in currentIndex until searchEnd) {
+            val pointIndicesToCheck = if (useSpatialIndex) {
+                searchIndices  // 공간 인덱스 후보 사용
+            } else {
+                (0 until searchEnd).toList()  // 경로 이탈 시 전체 검색
+            }
+
+            for (i in pointIndicesToCheck) {
                 val point = path.getOrNull(i) ?: continue
                 val distance = calculateDistance(currentLocation, point)
-                if (distance < minDistance) {
-                    minDistance = distance
-                    closestIndex = i
+
+                // 점 거리도 가중치 적용
+                var pointScore = distance * 1.0f
+
+                // 진행률 페널티 - 거리 기반으로 조정
+                if (i < currentIndex) {
+                    val penaltyMultiplier = when {
+                        isVeryFarFromPath -> 0.5f  // 매우 멀리 이탈 시 페널티 50% 감소
+                        isFarFromPath -> 1.0f  // 멀리 이탈 시 페널티 유지
+                        distance > 100f -> 1.5f  // 점에서 멀면 페널티 약간 증가
+                        else -> 10.0f  // 가까우면 기존처럼 큰 페널티
+                    }
+                    pointScore += (currentIndex - i) * penaltyMultiplier
+                }
+
+                // 방향 점수
+                if (currentBearing != null && currentBearing > 0f && i < path.size - 1) {
+                    val nextPoint = path.getOrNull(i + 1)
+                    if (nextPoint != null) {
+                        val pathBearing = calculateBearing(point, nextPoint)
+                        val bearingDiff = abs(shortestAngleDiff(currentBearing, pathBearing))
+                        pointScore += bearingDiff * 0.1f
+                    }
+                }
+
+                if (pointScore < bestScore) {
+                    bestScore = pointScore
+                    bestIndex = i
                 }
             }
 
-            return closestIndex.coerceIn(0, path.size - 1)
+            val finalDistance = calculateDistance(currentLocation, path[bestIndex])
+            Timber.d("Best match: index=$bestIndex (was $currentIndex), score=$bestScore, distance=${finalDistance}m, farFromPath=$isFarFromPath")
+
+            return bestIndex.coerceIn(0, path.size - 1)
         } catch (e: Exception) {
-            Timber.e("❌ Error in findClosestPathPointAhead: ${e.message}")
+            Timber.e(" Error in findClosestPathPointWithWeight: ${e.message}")
+            e.printStackTrace()
             return currentIndex.coerceIn(0, maxOf(0, path.size - 1))
         }
     }
@@ -1959,7 +2603,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     })
                 }
 
-                Timber.d("🗺️ Updated route: passed ${passedIndex} points, remaining ${remainingPath.size} points")
+                Timber.d("Updated route: passed ${passedIndex} points, remaining ${remainingPath.size} points")
             }
         }
     }
@@ -2020,7 +2664,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     .animate(CameraAnimation.Easing, 200) // 빠른 회전 애니메이션
                 map.moveCamera(cameraUpdate)
 
-                Timber.d("🗺️ Route-based navigation: location=$location (center), bearing=$smoothedBearing°")
+                Timber.d("Route-based navigation: location=$location (center), bearing=$smoothedBearing°")
             }
         }
     }
@@ -2059,8 +2703,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         if (now - lastTelemetrySentElapsed < TELEMETRY_INTERVAL_MS) return
         lastTelemetrySentElapsed = now
 
+        val navType = if (location.accuracy <= 30f) 1 else 2
+
         val payload = VehicleLocationPayload(
-            vecNavType = 1,
+            vecNavType = navType,
             vecLat = location.latitude,
             vecLon = location.longitude,
             vecAcc = location.accuracy.toDouble(),
@@ -2070,17 +2716,173 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         navigationViewModel.sendTelemetry(vehicleId, payload)
     }
 
+    private fun updateAccuracyState(accuracy: Float) {
+        if (accuracy <= ACCURACY_SNAP_THRESHOLD) {
+            accuracyStableCount++
+            if (inLowAccuracyMode && accuracyStableCount >= ACCURACY_STABLE_COUNT) {
+                inLowAccuracyMode = false
+                Timber.d("Accuracy recovered (<=${ACCURACY_SNAP_THRESHOLD}m)")
+            }
+        } else {
+            if (!inLowAccuracyMode) {
+                Timber.w("Entering low accuracy mode: accuracy=${accuracy}m")
+            }
+            inLowAccuracyMode = true
+            accuracyStableCount = 0
+        }
+    }
+
+    /**
+     * 스마트 재탐색 조건 평가 (T맵 스타일)
+     * 여러 신호를 종합하여 재탐색이 필요한지 판단합니다.
+     *
+     * @param distanceToPath 경로로부터의 거리 (미터)
+     * @param currentSpeed 현재 속도 (m/s)
+     * @param accuracy GPS 정확도 (미터)
+     * @param timeSinceLastReroute 마지막 재탐색으로부터 경과 시간 (밀리초)
+     * @param consecutiveOffRouteCount 연속 이탈 횟수
+     * @param isInTunnel 터널 모드 여부
+     * @param lastKnownBearing 현재 이동 방향 (도, null 가능)
+     * @param pathBearing 경로 방향 (도, null 가능)
+     * @return 재탐색 결정 결과
+     */
+    private fun evaluateRerouteCondition(
+        distanceToPath: Float,
+        currentSpeed: Float,
+        accuracy: Float,
+        timeSinceLastReroute: Long,
+        consecutiveOffRouteCount: Int,
+        isInTunnel: Boolean,
+        lastKnownBearing: Float?,
+        pathBearing: Float?
+    ): RerouteDecision {
+        // 1. 기본 조건 체크 - 재탐색 불가능한 상황
+        if (isInTunnel) {
+            return RerouteDecision(false, 0f, "터널 모드")
+        }
+        if (accuracy > OFF_ROUTE_MIN_ACCURACY) {
+            return RerouteDecision(false, 0f, "GPS 정확도 낮음 (${accuracy}m)")
+        }
+        if (timeSinceLastReroute < REROUTE_COOLDOWN_MS) {
+            return RerouteDecision(false, 0f, "쿨다운 중 (${timeSinceLastReroute}ms)")
+        }
+        // 속도 조건: Mock location이나 텔레포트 감지 시 완화
+        // 거리가 매우 멀면 (100m 이상) 속도 조건 무시
+        if (currentSpeed < 0.3f && distanceToPath < 100f) {
+            return RerouteDecision(false, 0f, "정지 중 (${currentSpeed}m/s, 거리=${distanceToPath.toInt()}m)")
+        }
+
+        var confidence = 0f
+        val reasons = mutableListOf<String>()
+
+        // 2. 거리 기반 신호 (가장 중요한 요소) - 더 민감하게 조정
+        when {
+            distanceToPath >= 60f -> {
+                confidence += 0.7f  // 60m 이상 이탈 시 매우 높은 확신도 (즉시 재탐색)
+                reasons.add("거리 60m 이상 (즉시 재탐색)")
+            }
+            distanceToPath >= 100f -> {
+                confidence += 0.5f  // 멀리 이탈 시 높은 확신도
+                reasons.add("거리 100m 이상")
+            }
+            distanceToPath >= REROUTE_THRESHOLD -> {
+                confidence += 0.4f  // 기본 임계값 이상
+                reasons.add("거리 ${REROUTE_THRESHOLD.toInt()}m 이상")
+            }
+            distanceToPath >= 50f -> {
+                confidence += 0.3f  // 50m 이상도 상당한 신호
+                reasons.add("거리 50m 이상")
+            }
+            distanceToPath >= 30f -> {
+                confidence += 0.15f  // 30m 이상도 약간의 신호
+                reasons.add("거리 30m 이상")
+            }
+        }
+
+        // 3. 방향 불일치 신호 (방향이 많이 다르면 재탐색 필요) - 더 민감하게
+        if (lastKnownBearing != null && pathBearing != null && lastKnownBearing > 0f) {
+            val bearingDiff = abs(shortestAngleDiff(lastKnownBearing, pathBearing))
+            if (bearingDiff > 45f && currentSpeed > 5f) {
+                confidence += 0.35f  // 방향 불일치 시 높은 신호
+                reasons.add("방향 불일치 ${bearingDiff.toInt()}°")
+            } else if (bearingDiff > 30f && currentSpeed > 10f) {
+                confidence += 0.25f
+                reasons.add("방향 차이 ${bearingDiff.toInt()}° (고속)")
+            } else if (bearingDiff > 30f && distanceToPath > 50f) {
+                confidence += 0.15f  // 중속이어도 거리가 멀면 신호
+                reasons.add("방향 차이 ${bearingDiff.toInt()}°")
+            }
+        }
+
+        // 4. 연속 이탈 신호 (여러 번 이탈하면 확신도 증가)
+        when {
+            consecutiveOffRouteCount >= 3 -> {
+                confidence += 0.25f  // 연속 이탈 시 높은 신호
+                reasons.add("연속 이탈 ${consecutiveOffRouteCount}회")
+            }
+            consecutiveOffRouteCount >= 2 -> {
+                confidence += 0.15f
+                reasons.add("연속 이탈 ${consecutiveOffRouteCount}회")
+            }
+            consecutiveOffRouteCount >= 1 -> {
+                confidence += 0.05f  // 1회 이탈도 약간의 신호
+                reasons.add("이탈 감지")
+            }
+        }
+
+        // 5. 속도 기반 신호 (고속일 때 더 민감하게 반응)
+        if (currentSpeed > 15f && distanceToPath > 50f) {
+            confidence += 0.15f  // 고속 주행 중 이탈 시 높은 신호
+            reasons.add("고속 주행 중 (${(currentSpeed * 3.6f).toInt()}km/h)")
+        } else if (currentSpeed > 10f && distanceToPath > 70f) {
+            confidence += 0.1f
+            reasons.add("중속 주행 중")
+        } else if (currentSpeed > 5f && distanceToPath > 100f) {
+            confidence += 0.1f  // 중저속이어도 거리가 멀면 신호
+            reasons.add("주행 중")
+        }
+
+        // 6. 정확도 기반 보정 (정확도가 좋으면 더 확신)
+        if (accuracy < 20f && distanceToPath > 50f) {
+            confidence += 0.1f  // 정확도가 좋으면 확신도 증가
+            reasons.add("GPS 정확도 양호")
+        } else if (accuracy > 50f) {
+            confidence -= 0.05f  // 정확도가 나쁘면 확신도 약간 감소 (완화)
+            reasons.add("GPS 정확도 낮음")
+        }
+
+        // 7. 예측 기반 신호 (5초 후 위치 예측)
+        if (lastKnownBearing != null && lastKnownBearing > 0f && currentSpeed > 5f) {
+            currentSpeed * 5f  // 5초 후 거리
+            // 예측 위치는 evaluateRerouteCondition 호출부에서 계산하여 전달받음
+            // 여기서는 예측 기반 신호를 별도로 처리하지 않음 (호출부에서 처리)
+        }
+
+        // 확신도는 0.0 ~ 1.0 범위로 제한
+        confidence = confidence.coerceIn(0f, 1f)
+
+        // 50% 이상 확신 시 재탐색 (기존 60%에서 완화) - 더 민감하게 반응
+        // 단, 거리가 매우 멀면 (60m 이상) 확신도와 관계없이 즉시 재탐색
+        val shouldReroute = confidence >= 0.5f || distanceToPath >= 60f
+
+        return RerouteDecision(
+            shouldReroute,
+            confidence,
+            if (reasons.isEmpty()) "조건 불충족" else reasons.joinToString(", ")
+        )
+    }
+
     /**
      * 경로 재검색 요청
      */
     private fun requestReroute(currentLocation: LatLng) {
         if (isRerouting) {
-            Timber.d("⏳ Already rerouting, skipping request")
+            Timber.d("Already rerouting, skipping request")
             return
         }
 
         isRerouting = true
-        Timber.d("🔄 Requesting reroute from current location: $currentLocation")
+        Timber.d("Requesting reroute from current location: $currentLocation")
         pendingRerouteLocation = currentLocation
         lastInstructionCleanMessage = null
         lastInstructionTargetIndex = null
@@ -2103,7 +2905,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         naverMap?.let { map ->
             // 수동 카메라 제어를 위해 None 모드로 설정
             map.locationTrackingMode = LocationTrackingMode.None
-            Timber.d("🧭 Navigation mode started - Manual camera control enabled")
+            Timber.d("Navigation mode started - Manual camera control enabled")
         }
     }
 
@@ -2117,12 +2919,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         naverMap?.let { map ->
             // Follow 모드로 변경 (일반 추적)
             map.locationTrackingMode = LocationTrackingMode.Follow
-            Timber.d("🧭 Navigation mode stopped - Follow tracking enabled")
+            Timber.d("Navigation mode stopped - Follow tracking enabled")
         }
     }
 
 
     override fun onDestroy() {
+        unregisterPipActionReceiver()
         super.onDestroy()
         stopNavigationMode()
         navigationManager.stopNavigation()
@@ -2136,13 +2939,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     fusedClient.removeLocationUpdates(cb)
                 }
                 isUsingFused = false
-                Timber.d("📍 Fused location updates stopped")
+                Timber.d("Fused location updates stopped")
             }
             val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
             locationManager.removeUpdates(locationListener)
-            Timber.d("📍 Location updates stopped")
+            Timber.d("Location updates stopped")
         } catch (e: Exception) {
-            Timber.e("📍 Error stopping location updates: ${e.message}")
+            Timber.e("Error stopping location updates: ${e.message}")
         }
     }
 
@@ -2167,5 +2970,16 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             sum += calculateDistance(path[i], path[i + 1])
         }
         return sum
+    }
+
+    private fun updateSpeedDisplay(speedMps: Float?) {
+        val speedText = speedMps
+            ?.takeIf { it.isFinite() && it >= 0f }
+            ?.let { mps ->
+                val speedKmh = (mps * 3.6f).coerceAtLeast(0f)
+                String.format(Locale.getDefault(), "%d km/h", speedKmh.roundToInt())
+            } ?: "-- km/h"
+
+        binding.tvCurrentSpeed.text = speedText
     }
 }

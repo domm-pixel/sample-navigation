@@ -55,8 +55,8 @@ class NavigationViewModel @Inject constructor(
                         val navigationRoute = NavigationMapper.mapToNavigationRoute(resultPath)
                         if (navigationRoute != null) {
                             _navigationRoute.value = navigationRoute
-                            Timber.d("✅ Navigation route loaded successfully")
-                            Timber.d("📊 Route info: ${navigationRoute.instructions.size} instructions, ${navigationRoute.summary.totalDistance}m total distance")
+                            Timber.d("Navigation route loaded successfully")
+                            Timber.d("Route info: ${navigationRoute.instructions.size} instructions, ${navigationRoute.summary.totalDistance}m total distance")
                         } else {
                             _errorMessage.value = "경로 데이터를 처리할 수 없습니다."
                             Timber.e("❌ Failed to map route data")
@@ -83,7 +83,7 @@ class NavigationViewModel @Inject constructor(
     fun setRoute(start: LatLng, destination: String) {
         startLocation = start
         destinationAddress = destination
-        Timber.d("📍 Route set: $start -> $destination")
+        Timber.d("Route set: $start -> $destination")
     }
 
     /**
@@ -115,8 +115,8 @@ class NavigationViewModel @Inject constructor(
                             _navigationRoute.value = navigationRoute
                             // 재검색 시 시작 위치 업데이트
                             startLocation = currentLocation
-                            Timber.d("✅ Route rerouted successfully")
-                            Timber.d("📊 New route info: ${navigationRoute.instructions.size} instructions, ${navigationRoute.summary.totalDistance}m total distance")
+                            Timber.d("Route rerouted successfully")
+                            Timber.d("New route info: ${navigationRoute.instructions.size} instructions, ${navigationRoute.summary.totalDistance}m total distance")
                         } else {
                             _errorMessage.value = "경로 데이터를 처리할 수 없습니다."
                             Timber.e("❌ Failed to map rerouted route data")
@@ -138,8 +138,8 @@ class NavigationViewModel @Inject constructor(
     fun sendTelemetry(vehicleId: Int, payload: VehicleLocationPayload) {
         viewModelScope.launch {
             telemetryRepository.sendLocation(vehicleId, payload)
-                .onFailure { Timber.w("📡 Telemetry send failed: ${it.message}") }
-                .onSuccess { Timber.d("📡 Telemetry sent") }
+                .onFailure { Timber.w("Telemetry send failed: ${it.message}") }
+                .onSuccess { Timber.d("Telemetry sent") }
         }
     }
 }

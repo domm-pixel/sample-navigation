@@ -32,22 +32,22 @@ class VoiceGuideManager(
                 if (isInitialized) {
                     tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
-                            Timber.d("🔊 TTS started: $utteranceId")
+                            Timber.d("TTS started: $utteranceId")
                         }
 
                         override fun onDone(utteranceId: String?) {
-                            Timber.d("🔊 TTS completed: $utteranceId")
+                            Timber.d("TTS completed: $utteranceId")
                         }
 
                         override fun onError(utteranceId: String?) {
-                            Timber.e("🔊 TTS error: $utteranceId")
+                            Timber.e("TTS error: $utteranceId")
                         }
                     })
                 }
 
-                Timber.d("🔊 TTS initialized: $isInitialized")
+                Timber.d("TTS initialized: $isInitialized")
             } else {
-                Timber.e("🔊 TTS initialization failed")
+                Timber.e("TTS initialization failed")
             }
         }
     }
@@ -69,7 +69,7 @@ class VoiceGuideManager(
         if (!isInitialized || !isEnabled) return
 
         tts?.speak(message + " 입니다", queueMode, null, "navigation_guide")
-        Timber.d("🔊 Speaking: $message 입니다")
+        Timber.d("Speaking: $message 입니다")
     }
 
     /**
@@ -79,7 +79,7 @@ class VoiceGuideManager(
         if (!isInitialized || !isEnabled) return
 
         tts?.speak(message, queueMode, null, "navigation_plain")
-        Timber.d("🔊 Speaking (plain): $message")
+        Timber.d("Speaking (plain): $message")
     }
     
     /**
@@ -92,12 +92,12 @@ class VoiceGuideManager(
         
         // 1. 안내 시작 알림 (QUEUE_FLUSH로 즉시 재생)
         tts?.speak("경로 안내를 시작합니다", TextToSpeech.QUEUE_FLUSH, null, "nav_start")
-        Timber.d("🔊 Speaking: 경로 안내를 시작합니다")
+        Timber.d("Speaking: 경로 안내를 시작합니다")
         
         // 2. 첫 번째 안내 메시지 (QUEUE_ADD로 순차 재생)
         val message = formatInstructionMessage(instruction)
         tts?.speak(message + " 입니다", TextToSpeech.QUEUE_ADD, null, "first_instruction")
-        Timber.d("🔊 Speaking (queued): $message 입니다")
+        Timber.d("Speaking (queued): $message 입니다")
     }
 
     /**

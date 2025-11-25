@@ -75,9 +75,17 @@ dependencies {
     implementation(libs.naver.maps)
     implementation(libs.play.services.location)
     // implementation(libs.androidx.databinding.runtime)
+    // Testing
     testImplementation(libs.junit)
+    testImplementation(libs.mockk)
+    testImplementation(libs.turbine)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.androidx.arch.core.testing)
+    
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.hilt.android.testing)
+    kspAndroidTest(libs.hilt.android.compiler)
     // json log
     implementation(libs.timber)
 

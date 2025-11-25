@@ -95,7 +95,7 @@ class NavigationManager(
         // 권한 체크
         if (!PermissionUtils.hasLocationPermission(context)) {
             _permissionRequired.value = true
-            Timber.w("📍 Location permission required")
+            Timber.w("Location permission required")
             return
         }
         
@@ -115,9 +115,9 @@ class NavigationManager(
         // 첫 번째 안내 메시지 설정
         updateCurrentInstruction()
         
-        // 🔊 안내 시작 알림 트리거 ("경로 안내를 시작합니다" + 첫 안내)
+        // 안내 시작 알림 트리거 ("경로 안내를 시작합니다" + 첫 안내)
         _shouldPlayNavigationStart.value = true
-        Timber.d("🔊 Navigation start announcement triggered")
+        Timber.d("Navigation start announcement triggered")
         
         Timber.d("🚀 Navigation started with ${route.instructions.size} instructions")
     }
@@ -201,7 +201,7 @@ class NavigationManager(
                 // 🔄 실시간 거리 업데이트 (항상 업데이트)
                 _currentInstruction.value = currentInstruction.copy(distanceToInstruction = distance)
                 
-                // 🔊 단계별 음성 안내 (특정 구간 진입 시에만 음성 재생)
+                // 단계별 음성 안내 (특정 구간 진입 시에만 음성 재생)
                 when {
                     distance <= 50 && lastAnnouncedDistance > 50 -> {
                         lastAnnouncedDistance = 50
@@ -256,7 +256,7 @@ class NavigationManager(
                 currentRoute = route
             )
             
-            Timber.d("📍 Navigation updated with currentLocation: $latLng")
+            Timber.d("Navigation updated with currentLocation: $latLng")
         }
     }
     
@@ -274,7 +274,7 @@ class NavigationManager(
             // 🔄 실시간 거리 업데이트 (항상 업데이트)
             _currentInstruction.value = currentInstruction.copy(distanceToInstruction = distance)
             
-            // 🔊 단계별 음성 안내 (특정 구간 진입 시에만 음성 재생)
+            // 단계별 음성 안내 (특정 구간 진입 시에만 음성 재생)
             when {
                 distance <= 50 && lastAnnouncedDistance > 50 -> {
                     lastAnnouncedDistance = 50
@@ -309,7 +309,7 @@ class NavigationManager(
                 currentInstructionIndex++
                 lastAnnouncedDistance = -1  // 다음 안내를 위해 초기화
                 updateCurrentInstruction()
-                Timber.d("✅ Moving to next instruction (${currentInstructionIndex})")
+                Timber.d("Moving to next instruction (${currentInstructionIndex})")
             }
         }
         
@@ -320,7 +320,7 @@ class NavigationManager(
         val remainingDistance = calculateRemainingDistance(location, route)
         
         // 디버깅 로그
-        Timber.d("📍 Navigation Update:")
+        Timber.d("Navigation Update:")
         Timber.d("   Current Location: $location")
         Timber.d("   Remaining Distance: ${remainingDistance}m")
         Timber.d("   Progress: ${(progress * 100).toInt()}%")
@@ -337,7 +337,7 @@ class NavigationManager(
             currentRoute = route
         )
         
-        Timber.d("📍 Navigation state updated with currentLocation: $location")
+        Timber.d("Navigation state updated with currentLocation: $location")
     }
     
     /**
