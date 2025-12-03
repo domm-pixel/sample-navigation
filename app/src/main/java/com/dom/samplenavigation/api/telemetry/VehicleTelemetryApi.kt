@@ -6,14 +6,14 @@ import retrofit2.http.Query
 
 interface VehicleTelemetryApi {
 
-    @GET("vec/vecNavBasicWriteProc.dit")
+    @GET("nav/navBasicWriteProc.dit")
     suspend fun postLocation(
-        @Query("vecBasicId") vecBasicId: Int,
-        @Query("vecNavType") vecNavType: Int,
-        @Query("vecLat") vecLat: Double,
-        @Query("vecLon") vecLon: Double,
-        @Query("vecAcc") vecAcc: Double,
-        @Query("vecPosTrsTime") vecPosTrsTime: String
+        @Query("navBasicId") vecBasicId: Int,
+        @Query("navType") vecNavType: Int,
+        @Query("navLat") vecLat: Double,
+        @Query("navLon") vecLon: Double,
+        @Query("navAcc") vecAcc: Double,
+        @Query("navTrsTime") vecPosTrsTime: String
     ): Response<Unit>
 }
 
