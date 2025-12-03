@@ -238,8 +238,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
             // OMS 스타일: Location Snapping 및 Camera Follow
             if (state.isNavigating && isNavigating && state.currentLocation != null && state.currentRoute != null) {
-                val gpsLocation = state.currentLocation!!
-                val route = state.currentRoute!!
+                val gpsLocation = state.currentLocation
+                val route = state.currentRoute
 
                 if (isMapReady) {
                     // 1. Location Snapping: GPS 위치를 경로에 스냅
