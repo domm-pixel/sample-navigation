@@ -80,6 +80,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     // Map
     private var naverMap: NaverMap? = null
     private var pathOverlays: MutableList<PathOverlay> = mutableListOf()
+    private var directionArrowOverlay: PathOverlay? = null  // 분기점 화살표 오버레이
     private var endMarker: Marker? = null
     private var currentLocationMarker: Marker? = null
     private var isMapReady = false
@@ -279,6 +280,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         navigationManager.currentInstruction.observe(this) { instruction ->
             instruction?.let {
                 updateInstructionUI(it)
+                // 분기점 화살표 업데이트
+                currentRoute?.let { route ->
+                    updateDirectionArrow(it, route)
+                }
                 updatePictureInPictureParams()
             }
         }
@@ -638,14 +643,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 기존 오버레이 제거
         pathOverlays.forEach { it.map = null }
         pathOverlays.clear()
+        directionArrowOverlay?.map = null
+        directionArrowOverlay = null
         endMarker?.map = null
 
         // 경로 표시
         pathOverlays.add(PathOverlay().apply {
             coords = route.path
-            color = Color.BLUE
-            patternImage = OverlayImage.fromResource(R.drawable.path_pattern)
-            patternInterval = 85
+            color = resources.getColor(R.color.skyBlue, null)
             outlineColor = Color.WHITE
             width = 40
             map = nMap
@@ -745,6 +750,67 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 lastLocation = it
                 navigationManager.updateCurrentLocation(latLng)
             }
+        }
+    }
+
+    // ==================== Direction Arrow (분기점 화살표) ====================
+
+    /**
+     * 분기점 기준으로 앞뒤 경로를 이어서 화살표 그리기
+     * instruction의 pointIndex를 기준으로 -1, 0(분기점), +1 → 최대 3개의 점 사용
+     */
+    private fun createDirectionArrow(
+        instruction: Instruction,
+        route: NavigationRoute
+    ): Pair<List<LatLng>, LatLng> {
+        val path = route.path
+        val pointIndex = instruction.pointIndex
+
+        if (path.isEmpty() || pointIndex !in path.indices) {
+            return Pair(emptyList(), path.firstOrNull() ?: LatLng(0.0, 0.0))
+        }
+
+        val center = path[pointIndex]
+
+        // 분기점 기준으로 -1, 0(분기점), +1 → 최대 3개의 점 사용
+        val startIndex = maxOf(0, pointIndex - 1)
+        val endIndexExclusive = minOf(path.size, pointIndex + 2) // +2 (exclusive) → pointIndex+1까지 포함
+
+        val arrowPath = path.subList(startIndex, endIndexExclusive).toList()
+
+        // 최소 2개 이상일 때만 사용
+        return if (arrowPath.size >= 2) {
+            Pair(arrowPath, center)
+        } else {
+            Pair(emptyList(), center)
+        }
+    }
+
+    /**
+     * 분기점 화살표 업데이트
+     */
+    private fun updateDirectionArrow(instruction: Instruction, route: NavigationRoute) {
+        val nMap = naverMap ?: return
+
+        // 기존 화살표 제거
+        directionArrowOverlay?.map = null
+        directionArrowOverlay = null
+
+        // 화살표 경로 생성
+        val (arrowPath, center) = createDirectionArrow(instruction, route)
+
+        // 화살표가 유효한 경우에만 표시
+        if (arrowPath.size >= 2) {
+            directionArrowOverlay = PathOverlay().apply {
+                coords = arrowPath
+                color = Color.WHITE
+                width = 25  // 기존 경로보다 두껍게
+                map = nMap
+                zIndex = 1000  // 기존 경로 위에 표시
+            }
+            Timber.d("Direction arrow updated at pointIndex=${instruction.pointIndex}, path size=${arrowPath.size}")
+        } else {
+            Timber.d("Direction arrow not created: insufficient path points")
         }
     }
 
@@ -1023,6 +1089,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private fun stopNavigationAndFinish() {
         isNavigating = false
         currentPathIndex = 0
+        
+        // 화살표 제거
+        directionArrowOverlay?.map = null
+        directionArrowOverlay = null
+        
         navigationManager.stopNavigation()
         navigationViewModel.stopNavigation()
         finish()
