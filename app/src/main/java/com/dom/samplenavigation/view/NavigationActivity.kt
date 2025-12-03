@@ -49,6 +49,7 @@ import com.naver.maps.map.LocationTrackingMode
 import com.naver.maps.map.MapFragment
 import com.naver.maps.map.NaverMap
 import com.naver.maps.map.OnMapReadyCallback
+import com.naver.maps.map.overlay.ArrowheadPathOverlay
 import com.naver.maps.map.overlay.PathOverlay
 import com.naver.maps.map.overlay.Marker
 import com.naver.maps.map.overlay.OverlayImage
@@ -799,18 +800,16 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 화살표 경로 생성
         val (arrowPath, center) = createDirectionArrow(instruction, route)
 
-        // 화살표가 유효한 경우에만 표시
-        if (arrowPath.size >= 2) {
-            directionArrowOverlay = PathOverlay().apply {
+        // ArrowheadPathOverlay 사용: 경로를 따라가고 끝에 자동으로 화살표 머리가 생김
+        if (arrowPath.isNotEmpty()) {
+            val arrowOverlay = ArrowheadPathOverlay().apply {
                 coords = arrowPath
                 color = Color.WHITE
-                width = 25  // 기존 경로보다 두껍게
+                outlineColor = Color.BLUE
+                width = 20
                 map = nMap
-                zIndex = 1000  // 기존 경로 위에 표시
             }
-            Timber.d("Direction arrow updated at pointIndex=${instruction.pointIndex}, path size=${arrowPath.size}")
-        } else {
-            Timber.d("Direction arrow not created: insufficient path points")
+            pathOverlays.add(arrowOverlay)
         }
     }
 
