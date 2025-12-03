@@ -111,6 +111,8 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     intent.putExtra("start_lat", currentLocation!!.latitude)
                     intent.putExtra("start_lng", currentLocation!!.longitude)
                     intent.putExtra("destination", mainViewModel.destinationAddress!!)
+                    // 시뮬레이션 모드 플래그 전달
+                    intent.putExtra("simulation_mode", switchSimulationMode.isChecked)
                     // 경로 데이터도 전달 (Parcelable로 전달)
                     if (currentRoute != null) {
                         // NavigationRoute를 Intent로 전달하려면 Parcelable로 구현해야 합니다
@@ -169,11 +171,13 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     currentRoute = route
                     displayRoute(route)
                     btnStartNavigation.visibility = View.VISIBLE
+                    layoutSimulation.visibility = View.VISIBLE  // 시뮬레이션 스위치 표시
                     val selected = routeOptions.firstOrNull { it.route == route }
                     selected?.let { routeOptionAdapter.updateSelection(it.optionType) }
                     Timber.d("Route displayed, navigation button shown")
                 } else {
                     btnStartNavigation.visibility = View.GONE
+                    layoutSimulation.visibility = View.GONE  // 시뮬레이션 스위치 숨김
                 }
             }
 
@@ -559,9 +563,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
             rvRouteOptions.visibility = View.GONE
         }
         
-        // 안내 시작 버튼 숨기기
+        // 안내 시작 버튼 및 시뮬레이션 스위치 숨기기
         binding {
             btnStartNavigation.visibility = View.GONE
+            layoutSimulation.visibility = View.GONE
         }
         
         Timber.d("🔄 Route and destination cleared")

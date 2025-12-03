@@ -35,6 +35,7 @@ import com.dom.samplenavigation.navigation.model.NavigationRoute
 import com.dom.samplenavigation.navigation.model.NavigationState
 import com.dom.samplenavigation.navigation.voice.VoiceGuideManager
 import com.dom.samplenavigation.view.viewmodel.NavigationViewModel
+import com.dom.samplenavigation.api.telemetry.model.VehicleLocationPayload
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -52,6 +53,7 @@ import com.naver.maps.map.OnMapReadyCallback
 import com.naver.maps.map.overlay.ArrowheadPathOverlay
 import com.naver.maps.map.overlay.PathOverlay
 import com.naver.maps.map.overlay.Marker
+import com.naver.maps.map.overlay.Overlay
 import com.naver.maps.map.overlay.OverlayImage
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
@@ -80,8 +82,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     // Map
     private var naverMap: NaverMap? = null
-    private var pathOverlays: MutableList<PathOverlay> = mutableListOf()
-    private var directionArrowOverlay: PathOverlay? = null  // 분기점 화살표 오버레이
+    private var pathOverlays: MutableList<Overlay> = mutableListOf()
+    private var directionArrowOverlay: ArrowheadPathOverlay? = null  // 분기점 화살표 오버레이 (별도 관리)
     private var endMarker: Marker? = null
     private var currentLocationMarker: Marker? = null
     private var isMapReady = false
@@ -93,6 +95,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var isNavigating = false
     private var isRerouting = false
     private var lastRerouteTime: Long = 0
+
+    // Simulation Mode
+    private var isSimulationMode: Boolean = true  // 시뮬레이션 모드 플래그
+    private var simulationJob: kotlinx.coroutines.Job? = null  // 시뮬레이션 코루틴 작업
 
     // Camera State (OMS 스타일)
     private var currentBearing: Float = 0f
@@ -146,6 +152,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         private const val DEFAULT_TILT = 0.0
         private const val BEARING_SMOOTH_ALPHA = 0.3f  // 베어링 스무딩 계수
         
+        // Simulation 상수
+        private const val SIMULATION_UPDATE_INTERVAL_MS = 800L  // 시뮬레이션 업데이트 간격 (밀리초)
+        private const val SIMULATION_SPEED_KMH = 50f  // 시뮬레이션 속도 (km/h)
+        
         // PIP
         private const val ACTION_PIP_STOP_NAVIGATION = "com.dom.samplenavigation.action.PIP_STOP"
         private const val ACTION_PIP_TOGGLE_VOICE = "com.dom.samplenavigation.action.PIP_TOGGLE_VOICE"
@@ -169,11 +179,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         val startLat = intent.getDoubleExtra("start_lat", 0.0)
         val startLng = intent.getDoubleExtra("start_lng", 0.0)
         val destination = intent.getStringExtra("destination")
+        // 시뮬레이션 모드 플래그 (기본값: false)
+        isSimulationMode = intent.getBooleanExtra("simulation_mode", false)
 
         if (startLat != 0.0 && startLng != 0.0 && !destination.isNullOrEmpty()) {
             val startLocation = LatLng(startLat, startLng)
             navigationViewModel.setRoute(startLocation, destination)
-            Timber.d("Navigation data set: $startLocation -> $destination")
+            Timber.d("Navigation data set: $startLocation -> $destination, simulationMode=$isSimulationMode")
         } else {
             Timber.w("Navigation data not available")
         }
@@ -182,8 +194,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         setupObservers()
         setupClickListeners()
 
-        // 위치 권한 확인
-        checkLocationPermission()
+        // 위치 권한 확인 (시뮬레이션 모드가 아닐 때만)
+        if (!isSimulationMode) {
+            checkLocationPermission()
+        }
     }
 
     private fun setupMap() {
@@ -342,6 +356,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 // 네비게이션 시작 시 즉시 3D 뷰로 전환
                 if (isMapReady && snappedLocation != null) {
                     updateCameraFollow(snappedLocation!!, currentBearing, 0f)
+                }
+
+                // 시뮬레이션 모드 시작
+                if (isSimulationMode) {
+                    startSimulation(newRoute)
                 }
             }
         }
@@ -641,11 +660,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private fun displayRoute(route: NavigationRoute) {
         val nMap = naverMap ?: return
 
-        // 기존 오버레이 제거
+        // 기존 경로 오버레이만 제거 (화살표는 유지)
         pathOverlays.forEach { it.map = null }
         pathOverlays.clear()
-        directionArrowOverlay?.map = null
-        directionArrowOverlay = null
         endMarker?.map = null
 
         // 경로 표시
@@ -709,6 +726,12 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     @RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun startLocationUpdates() {
+        // 시뮬레이션 모드일 때는 실제 위치 업데이트 시작하지 않음
+        if (isSimulationMode) {
+            Timber.d("Simulation mode active - skipping real location updates")
+            return
+        }
+
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
             .setMinUpdateIntervalMillis(500L)
             .setMinUpdateDistanceMeters(1f)
@@ -718,6 +741,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         if (fusedCallback == null) {
             fusedCallback = object : LocationCallback() {
                 override fun onLocationResult(result: LocationResult) {
+                    // 시뮬레이션 모드일 때는 실제 위치 업데이트 무시
+                    if (isSimulationMode) return
+
                     val loc = result.lastLocation ?: return
                     val latLng = LatLng(loc.latitude, loc.longitude)
 
@@ -736,6 +762,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     // NavigationManager에 위치 업데이트
                     navigationManager.updateCurrentLocation(latLng)
 
+                    // Telemetry API 호출 (시뮬레이션이 아닐 때만)
+                    sendLocationTelemetry(loc)
+
                     Timber.d("Location: $latLng, bearing=${currentBearing}°, speed=${currentSpeed * 3.6f}km/h")
                 }
             }
@@ -745,13 +774,169 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         // 마지막 알려진 위치 즉시 반영
         fusedClient.lastLocation.addOnSuccessListener { loc ->
+            if (isSimulationMode) return@addOnSuccessListener
             loc?.let {
                 val latLng = LatLng(it.latitude, it.longitude)
                 lastKnownLocation = latLng
                 lastLocation = it
                 navigationManager.updateCurrentLocation(latLng)
+                
+                // Telemetry API 호출 (시뮬레이션이 아닐 때만)
+                sendLocationTelemetry(it)
             }
         }
+    }
+
+    // ==================== Telemetry (위치 전송) ====================
+
+    /**
+     * 위치 정보를 Telemetry API로 전송
+     * 시뮬레이션 모드가 아닐 때만 호출됩니다.
+     */
+    private fun sendLocationTelemetry(location: Location) {
+        if (isSimulationMode) return
+
+        try {
+            val dateFormat = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault())
+            val regDate = dateFormat.format(Date(location.time))
+
+            val payload = VehicleLocationPayload(
+                vecNavType = 1,  // 네비게이션 타입 (필요에 따라 변경 가능)
+                vecLat = location.latitude,
+                vecLon = location.longitude,
+                vecAcc = location.accuracy.toDouble(),
+                regDate = regDate
+            )
+
+            // vehicleId는 임시로 1로 설정 (필요시 Intent로 전달받거나 설정에서 가져올 수 있음)
+            val vehicleId = 1
+
+            navigationViewModel.sendTelemetry(vehicleId, payload)
+            Timber.d("Telemetry sent: lat=${location.latitude}, lon=${location.longitude}, acc=${location.accuracy}m")
+        } catch (e: Exception) {
+            Timber.e("Failed to send telemetry: ${e.message}")
+        }
+    }
+
+    // ==================== Simulation Mode (시뮬레이션 모드) ====================
+
+    /**
+     * 시뮬레이션 모드 시작
+     * 경로를 따라 일정 시간마다 인덱스를 증가시키며 가짜 위치를 생성합니다.
+     */
+    private fun startSimulation(route: NavigationRoute) {
+        if (route.path.isEmpty()) {
+            Timber.w("Cannot start simulation: route path is empty")
+            return
+        }
+
+        // 기존 시뮬레이션 중지
+        stopSimulation()
+
+        Timber.d("Starting simulation mode - route has ${route.path.size} points")
+
+        // 시뮬레이션 시작 위치 초기화
+        currentPathIndex = 0
+        snappedLocation = route.path[0]
+        lastKnownLocation = route.path[0]
+
+        // 시뮬레이션 코루틴 시작
+        simulationJob = lifecycleScope.launch {
+            while (isNavigating && currentPathIndex < route.path.size - 1) {
+                // 다음 경로 포인트로 이동
+                currentPathIndex++
+                val nextLocation = route.path[currentPathIndex]
+                snappedLocation = nextLocation
+                lastKnownLocation = nextLocation
+
+                // 가짜 Location 객체 생성 및 저장
+                val simulatedLocation = createSimulatedLocation(nextLocation, route)
+                lastLocation = simulatedLocation
+
+                // 속도 및 베어링 업데이트
+                currentSpeed = simulatedLocation.speed
+                if (simulatedLocation.hasBearing()) {
+                    currentBearing = simulatedLocation.bearing
+                } else if (currentPathIndex > 0) {
+                    val prevLocation = route.path[currentPathIndex - 1]
+                    currentBearing = calculateBearing(prevLocation, nextLocation)
+                }
+
+                // NavigationManager에 시뮬레이션 위치 업데이트
+                navigationManager.updateCurrentLocation(nextLocation)
+
+                // 카메라 업데이트
+                if (isMapReady) {
+                    updateCameraFollow(nextLocation, currentBearing, currentSpeed)
+                    updateCurrentLocationMarker(nextLocation)
+                }
+
+                Timber.d("Simulation: index=$currentPathIndex/${route.path.size - 1}, location=$nextLocation, speed=${currentSpeed * 3.6f}km/h")
+
+                // 도착 확인
+                val distanceToDestination = calculateDistance(
+                    nextLocation,
+                    route.summary.endLocation
+                )
+                if (distanceToDestination <= ARRIVAL_THRESHOLD_M) {
+                    Timber.d("Simulation arrived at destination!")
+                    navigationManager.stopNavigation()
+                    stopSimulation()
+                    Toast.makeText(this@NavigationActivity, "목적지에 도착했습니다!", Toast.LENGTH_SHORT).show()
+                    break
+                }
+
+                // 다음 업데이트까지 대기
+                kotlinx.coroutines.delay(SIMULATION_UPDATE_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * 시뮬레이션 모드 중지
+     */
+    private fun stopSimulation() {
+        simulationJob?.cancel()
+        simulationJob = null
+        Timber.d("Simulation stopped")
+    }
+
+    /**
+     * 시뮬레이션용 가짜 Location 객체 생성
+     */
+    private fun createSimulatedLocation(latLng: LatLng, route: NavigationRoute): Location {
+        val location = Location("simulation")
+        location.latitude = latLng.latitude
+        location.longitude = latLng.longitude
+        location.accuracy = 5f  // 시뮬레이션은 정확도 5m
+        location.speed = SIMULATION_SPEED_KMH / 3.6f  // m/s
+        location.time = System.currentTimeMillis()
+        location.elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+
+        // 베어링 설정
+        if (currentPathIndex > 0 && currentPathIndex < route.path.size) {
+            val prevLocation = route.path[currentPathIndex - 1]
+            val bearing = calculateBearing(prevLocation, latLng)
+            location.bearing = bearing
+            location.bearingAccuracyDegrees = 5f
+        }
+
+        return location
+    }
+
+    /**
+     * 두 지점 간의 방향 계산 (도)
+     */
+    private fun calculateBearing(from: LatLng, to: LatLng): Float {
+        val lat1 = Math.toRadians(from.latitude)
+        val lat2 = Math.toRadians(to.latitude)
+        val deltaLng = Math.toRadians(to.longitude - from.longitude)
+
+        val y = sin(deltaLng) * cos(lat2)
+        val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(deltaLng)
+
+        val bearing = Math.toDegrees(atan2(y, x))
+        return normalizeBearing(bearing.toFloat())
     }
 
     // ==================== Direction Arrow (분기점 화살표) ====================
@@ -789,27 +974,32 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     /**
      * 분기점 화살표 업데이트
+     * 현재 instruction의 분기점에 화살표를 표시하고,
+     * 다음 instruction으로 넘어가면 자동으로 다음 분기점의 화살표로 업데이트됩니다.
      */
     private fun updateDirectionArrow(instruction: Instruction, route: NavigationRoute) {
         val nMap = naverMap ?: return
 
-        // 기존 화살표 제거
+        // 기존 화살표 제거 (이전 분기점 화살표)
         directionArrowOverlay?.map = null
         directionArrowOverlay = null
 
-        // 화살표 경로 생성
+        // 화살표 경로 생성 (현재 instruction의 분기점 기준)
         val (arrowPath, center) = createDirectionArrow(instruction, route)
 
         // ArrowheadPathOverlay 사용: 경로를 따라가고 끝에 자동으로 화살표 머리가 생김
-        if (arrowPath.isNotEmpty()) {
-            val arrowOverlay = ArrowheadPathOverlay().apply {
+        if (arrowPath.size >= 2) {
+            directionArrowOverlay = ArrowheadPathOverlay().apply {
                 coords = arrowPath
                 color = Color.WHITE
                 outlineColor = Color.BLUE
                 width = 20
                 map = nMap
+                zIndex = 1000  // 경로 위에 표시
             }
-            pathOverlays.add(arrowOverlay)
+            Timber.d("Direction arrow updated: instruction pointIndex=${instruction.pointIndex}, arrowPath size=${arrowPath.size}")
+        } else {
+            Timber.d("Direction arrow not created: insufficient path points (${arrowPath.size})")
         }
     }
 
@@ -1089,6 +1279,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         isNavigating = false
         currentPathIndex = 0
         
+        // 시뮬레이션 중지
+        stopSimulation()
+        
         // 화살표 제거
         directionArrowOverlay?.map = null
         directionArrowOverlay = null
@@ -1102,6 +1295,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         unregisterPipActionReceiver()
         super.onDestroy()
         stopNavigationMode()
+        stopSimulation()  // 시뮬레이션 중지
         navigationManager.stopNavigation()
         voiceGuideManager.release()
 
