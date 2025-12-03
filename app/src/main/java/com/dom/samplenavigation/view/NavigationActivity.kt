@@ -30,7 +30,6 @@ import com.dom.samplenavigation.R
 import com.dom.samplenavigation.api.telemetry.model.VehicleLocationPayload
 import com.dom.samplenavigation.base.BaseActivity
 import com.dom.samplenavigation.databinding.ActivityNavigationBinding
-import com.dom.samplenavigation.navigation.filter.PathSpatialIndex
 import com.dom.samplenavigation.navigation.manager.NavigationManager
 import com.dom.samplenavigation.navigation.model.Instruction
 import com.dom.samplenavigation.navigation.model.NavigationRoute
@@ -87,7 +86,6 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private val navigationViewModel: NavigationViewModel by viewModels()
     private lateinit var navigationManager: NavigationManager
     private lateinit var voiceGuideManager: VoiceGuideManager
-    private var pathSpatialIndex: PathSpatialIndex? = null  // 공간 인덱스 (경로 로드 시 생성)
     private val offRouteDetector = OffRouteDetector()
 
     // MapLibreNavigation 인스턴스
@@ -431,7 +429,6 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         navigationViewModel.navigationRoute.observe(this) { route ->
             route?.let { newRoute ->
                 // 공간 인덱스 구축 (경로가 로드될 때)
-                pathSpatialIndex = PathSpatialIndex(newRoute.path)
                 Timber.d("Spatial index created for route with ${newRoute.path.size} points")
 
                 // MapLibreNavigation 초기화
@@ -757,9 +754,6 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         cameraSpeedInitialized = false
         lastSpeedMps = 0f
         updateSpeedDisplay(null)
-
-        // 공간 인덱스 리셋
-        pathSpatialIndex = null
 
         // 액티비티 종료
         finish()
@@ -2053,41 +2047,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 else -> baseSearchRange
             }
 
-            // 공간 인덱싱 사용 여부 결정
-            val useSpatialIndex = pathSpatialIndex?.isAvailable() == true && path.size >= 100
 
             // 검색할 인덱스 범위 결정
-            val searchIndices = if (useSpatialIndex) {
-                // 공간 인덱스를 사용하여 근접 포인트만 검색
-                val radiusMeters = when {
-                    isVeryFarFromPath -> 1000.0  // 매우 멀리 이탈 시 1km 반경
-                    isFarFromPath -> 700.0  // 멀리 이탈 시 700m 반경
-                    currentSpeed > 33.3f -> 1000.0  // 초고속 (120km/h 이상): 1km 반경
-                    currentSpeed > 27.8f -> 800.0  // 고속 (100km/h 이상): 800m 반경
-                    currentSpeed > 13.9f -> 500.0  // 중고속 (50km/h 이상): 500m 반경
-                    currentSpeed > 4.2f -> 300.0  // 중속: 300m 반경
-                    else -> 150.0                  // 저속: 150m 반경
-                }
-                val nearbyIndices = pathSpatialIndex!!.findNearbyPoints(
-                    center = currentLocation,
-                    radiusMeters = radiusMeters,
-                    startIndex = if (isVeryFarFromPath || isFarFromPath) 0 else currentIndex  // 멀리 이탈 시 시작 인덱스 제한 없음
-                )
-                // 경로 이탈 시에는 검색 범위 제한 없음
-                if (isVeryFarFromPath || isFarFromPath) {
-                    nearbyIndices
-                } else {
-                    val maxIndex = minOf(currentIndex + baseSearchRange, path.size)
-                    nearbyIndices.filter { it in currentIndex until maxIndex }
-                }
+            val searchIndices = if (isVeryFarFromPath) {
+                // 멀리 이탈 시 전체 경로 검색
+                (0 until path.size).toList()
             } else {
-                // 기존 방식: 순차 검색
-                if (isVeryFarFromPath || isFarFromPath) {
-                    // 멀리 이탈 시 전체 경로 검색
-                    (0 until path.size).toList()
-                } else {
-                    (currentIndex until minOf(currentIndex + searchRange, path.size)).toList()
-                }
+                (currentIndex until minOf(currentIndex + searchRange, path.size)).toList()
             }
 
             val searchEnd = if (isVeryFarFromPath || isFarFromPath) path.size else minOf(
@@ -2098,15 +2064,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             var bestScore = Float.MAX_VALUE
             var bestIndex = closestPointIndex  // 초기값을 가장 가까운 지점으로 설정
 
-            Timber.d("Weighted path matching: speed=${currentSpeed}m/s, bearing=${currentBearing}°, distanceToPath=${minDistanceToPath.toInt()}m, range=$searchRange, spatialIndex=${if (useSpatialIndex) "ON" else "OFF"}, candidates=${searchIndices.size}, farFromPath=$isFarFromPath")
-
             // 경로상의 선분들에 대한 가중치 점수 계산
             // 공간 인덱스를 사용하면 후보 인덱스만 검색, 아니면 기존 방식
-            val indicesToCheck = if (useSpatialIndex) {
-                searchIndices.filter { it < path.size - 1 }  // 선분 검색을 위해 마지막 인덱스 제외
-            } else {
-                (0 until searchEnd - 1).toList()  // 경로 이탈 시 전체 검색
-            }
+            val indicesToCheck = (0 until searchEnd - 1).toList()
 
             for (i in indicesToCheck) {
                 val p1 = path.getOrNull(i) ?: continue
@@ -2171,11 +2131,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             }
 
             // 경로상의 점들과의 직접 거리도 확인 (더 정확한 매칭을 위해)
-            val pointIndicesToCheck = if (useSpatialIndex) {
-                searchIndices  // 공간 인덱스 후보 사용
-            } else {
-                (0 until searchEnd).toList()  // 경로 이탈 시 전체 검색
-            }
+            val pointIndicesToCheck = (0 until searchEnd).toList()
 
             for (i in pointIndicesToCheck) {
                 val point = path.getOrNull(i) ?: continue
