@@ -136,6 +136,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var isVoiceGuideEnabled: Boolean = true
     private var suppressVoiceSwitchCallback: Boolean = false
 
+    // Telemetry navType (MainActivity에서 전달받아 사용)
+    private var navTypeForTelemetry: Int = 1
+
     // Picture-in-Picture
     private var isInPictureInPictureModeCompat: Boolean = false
     private val pipActionReceiver = object : BroadcastReceiver() {
@@ -211,6 +214,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             intent.getIntExtra("route_option", RouteOptionType.TRAOPTIMAL.ordinal)
         selectedRouteOption =
             RouteOptionType.entries.getOrNull(routeOptionOrdinal) ?: RouteOptionType.TRAOPTIMAL
+
+        // Telemetry용 navType (기본값 1)
+        navTypeForTelemetry = intent.getIntExtra("nav_type", 1)
 
         if (startLat != 0.0 && startLng != 0.0 && !destination.isNullOrEmpty()) {
             val startLocation = LatLng(startLat, startLng)
@@ -1067,6 +1073,60 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         }
 
         binding.tvCurrentInstruction.text = messageWithDistance
+
+        // 분기점 아이콘 표시 (500m 이내)
+        val iconRes = getDirectionIconRes(instruction.type)
+        if (iconRes != null && distance <= 500) {
+            binding.clRouteNotification.visibility = View.VISIBLE
+            binding.ivRouteDirection.setImageResource(iconRes)
+        } else {
+            binding.clRouteNotification.visibility = View.GONE
+        }
+    }
+
+    /**
+     * 안내 타입에 따라 분기점 아이콘 리소스 반환
+     */
+    private fun getDirectionIconRes(type: Int): Int? {
+        return when (type) {
+            // 직진
+            1 -> R.drawable.ic_nav_straight_1
+
+            // 좌회전 계열
+            2, 4, 8, 12 -> R.drawable.ic_nav_turn_left_2_4_8_12
+            11 -> R.drawable.ic_nav_turn_left_11
+            13 -> R.drawable.ic_nav_turn_left_13
+
+            // 우회전 계열
+            3, 5, 15 -> R.drawable.ic_nav_turn_right_3_5_15
+            14 -> R.drawable.ic_turn_right_14
+            16 -> R.drawable.ic_turn_right_16
+
+            // 유턴
+            6 -> R.drawable.ic_nav_uturn_6
+
+            // 로터리/회전교차로 - 직진
+            21, 28, 91, 98 -> R.drawable.ic_nav_roundabout_straight_21_28_91_98
+
+            // 로터리/회전교차로 - 유턴
+            22, 34, 92, 104 -> R.drawable.ic_nav_roundabout_uturn_22_34_92_104
+
+            // 로터리/회전교차로 - 좌측
+            23, 24, 93, 94 -> R.drawable.ic_nav_roundabout__left_23_24_93_94
+            25, 95 -> R.drawable.ic_nav_roundabout_left_25_95
+            26, 27, 96, 97 -> R.drawable.ic_nav_roundabout_left_26_27_96_97
+
+            // 로터리/회전교차로 - 우측
+            25, 101 -> R.drawable.ic_nav_roundabout_right_25_101
+            29, 30, 99, 100 -> R.drawable.ic_nav_roundabout_right_29_30_99_100
+            32, 33, 102, 103 -> R.drawable.ic_nav_roundabout_right_32_33_102_103
+
+            // 본선 합류
+            81 -> R.drawable.ic_nav_merge_left_81
+            82 -> R.drawable.ic_nav_merge_right_82
+
+            else -> null
+        }
     }
 
     private fun displayRoute(route: NavigationRoute, showFullRoute: Boolean = false) {
@@ -1357,8 +1417,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 regDate = regDate
             )
 
-            // vehicleId는 임시로 1로 설정 (필요시 Intent로 전달받거나 설정에서 가져올 수 있음)
-            val vehicleId = 1
+            val vehicleId = navTypeForTelemetry
 
             navigationViewModel.sendTelemetry(vehicleId, payload)
             Timber.d("Telemetry sent: lat=${location.latitude}, lon=${location.longitude}, acc=${location.accuracy}m")

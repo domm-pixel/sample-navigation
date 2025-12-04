@@ -11,9 +11,12 @@ import android.location.LocationManager
 import android.os.Bundle
 import android.view.View
 import android.widget.Toast
+import android.widget.EditText
+import android.text.InputType
 import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.appcompat.app.AlertDialog
 import com.dom.samplenavigation.R
 import com.dom.samplenavigation.base.BaseActivity
 import com.dom.samplenavigation.databinding.ActivityMainBinding
@@ -51,6 +54,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
     private var currentRoute: NavigationRoute? = null
     private lateinit var routeOptionAdapter: RouteOptionAdapter
     private var routeOptions: List<NavigationOptionRoute> = emptyList()
+    private var selectedNavType: Int = 1  // Telemetry용 vecNavType 값
     
     companion object {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1000
@@ -103,29 +107,43 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
             // 안내 시작 버튼 클릭
             btnStartNavigation.setOnClickListener {
                 if (currentLocation != null && mainViewModel.destinationAddress != null) {
-                    // 네비게이션 화면으로 이동하면서 데이터 전달
-                    val intent = Intent(this@MainActivity, NavigationActivity::class.java)
-                    intent.putExtra("start_lat", currentLocation!!.latitude)
-                    intent.putExtra("start_lng", currentLocation!!.longitude)
-                    intent.putExtra("destination", mainViewModel.destinationAddress!!)
-                    // 시뮬레이션 모드 플래그 전달
-                    intent.putExtra("simulation_mode", switchSimulationMode.isChecked)
-                    // 선택된 경로 옵션 전달
-                    val selectedOption = routeOptions.firstOrNull { 
-                        it.route == mainViewModel.navigationRoute.value 
-                    }?.optionType
-                    if (selectedOption != null) {
-                        intent.putExtra("route_option", selectedOption.ordinal)
+                    // vecNavType 입력 다이얼로그
+                    val input = EditText(this@MainActivity).apply {
+                        inputType = InputType.TYPE_CLASS_NUMBER
+                        setText(selectedNavType.toString())
                     }
-                    // 경로 데이터도 전달 (Parcelable로 전달)
-                    if (currentRoute != null) {
-                        // NavigationRoute를 Intent로 전달하려면 Parcelable로 구현해야 합니다
-                        // 여기서는 간단하게 start/end 위치만 전달하고 NavigationActivity에서 다시 조회하도록 합니다
-                    }
-                    startActivity(intent)
-                    
-                    // 안내 시작 후 경로 및 주소 정보 초기화
-                    clearRoute()
+
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("번호를 입력하세요! 입력: 성순님 1번, 태훈님 2번...")
+                        .setView(input)
+                        .setPositiveButton("확인") { _, _ ->
+                            val navType = input.text.toString().toIntOrNull() ?: 1
+                            selectedNavType = navType
+
+                            // 네비게이션 화면으로 이동하면서 데이터 전달
+                            val intent = Intent(this@MainActivity, NavigationActivity::class.java)
+                            intent.putExtra("start_lat", currentLocation!!.latitude)
+                            intent.putExtra("start_lng", currentLocation!!.longitude)
+                            intent.putExtra("destination", mainViewModel.destinationAddress!!)
+                            // 시뮬레이션 모드 플래그 전달
+                            intent.putExtra("simulation_mode", switchSimulationMode.isChecked)
+                            // 선택된 경로 옵션 전달
+                            val selectedOption = routeOptions.firstOrNull {
+                                it.route == mainViewModel.navigationRoute.value
+                            }?.optionType
+                            if (selectedOption != null) {
+                                intent.putExtra("route_option", selectedOption.ordinal)
+                            }
+                            // Telemetry용 navType 전달
+                            intent.putExtra("nav_type", selectedNavType)
+
+                            startActivity(intent)
+
+                            // 안내 시작 후 경로 및 주소 정보 초기화
+                            clearRoute()
+                        }
+                        .setNegativeButton("취소", null)
+                        .show()
                 }
             }
         }

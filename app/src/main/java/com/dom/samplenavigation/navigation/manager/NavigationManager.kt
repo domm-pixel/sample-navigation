@@ -60,13 +60,13 @@ class NavigationManager(
     
     companion object {
         private const val ACCURACY_BAD_M = 20f
-        private const val MIN_MOVE_DISTANCE_M = 3f
+        private const val MIN_MOVE_DISTANCE_M = 1.5f  // 걸을 때도 베어링 업데이트 가능하도록 낮춤 (3m -> 1.5m)
         private const val TELEPORT_RESET_M = 100f
         private const val MAX_BEARING_JUMP_DEG = 45f
         private const val MAX_STEP_DEG = 15f
         private const val EMA_ALPHA_FAST = 0.3f
         private const val EMA_ALPHA_SLOW = 0.1f
-        private const val SPEED_STATIONARY = 1.0f
+        private const val SPEED_STATIONARY = 0.5f  // 걸을 때도 빠른 업데이트 가능하도록 낮춤 (1.0 m/s -> 0.5 m/s = 1.8 km/h)
     }
     
     private val locationListener = object : LocationListener {

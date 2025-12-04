@@ -81,18 +81,18 @@
         </LinearLayout>
 
         <ImageButton
-            android:visibility="gone"
             android:id="@+id/btn_enter_pip"
             android:layout_width="48dp"
             android:layout_height="48dp"
-            android:layout_marginEnd="16dp"
             android:layout_marginTop="40dp"
+            android:layout_marginEnd="16dp"
             android:background="@android:color/white"
             android:contentDescription="@string/pip_enter_content_description"
             android:elevation="8dp"
             android:padding="12dp"
             android:scaleType="centerInside"
             android:src="@android:drawable/ic_media_play"
+            android:visibility="gone"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ImageContrastCheck" />
@@ -187,17 +187,41 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="16dp"
             android:layout_marginTop="16dp"
-            android:background="#66000000"
             android:alpha="0.5"
+            android:background="#66000000"
             android:paddingHorizontal="16dp"
             android:paddingVertical="12dp"
             android:text="-- km/h"
             android:textColor="@color/white"
             android:textSize="30sp"
             android:textStyle="bold"
-            app:layout_constraintTop_toBottomOf="@+id/instruction_card"
             app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/instruction_card"
             tools:text="45 km/h" />
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:id="@+id/clRouteNotification"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_margin="16dp"
+            android:alpha="0.6"
+            android:visibility="gone"
+            tools:visibility="visible"
+            app:layout_constraintEnd_toEndOf="parent"
+            android:background="@drawable/bg_route_noti"
+            app:layout_constraintTop_toBottomOf="@+id/instruction_card">
+
+            <ImageView
+                android:id="@+id/ivRouteDirection"
+                app:layout_constraintTop_toTopOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintBottom_toBottomOf="parent"
+                android:src="@drawable/ic_nav_straight_1"
+                android:layout_width="120dp"
+                android:layout_height="120dp"/>
+
+        </androidx.constraintlayout.widget.ConstraintLayout>
 
         <!-- 로딩 인디케이터 -->
         <ProgressBar
