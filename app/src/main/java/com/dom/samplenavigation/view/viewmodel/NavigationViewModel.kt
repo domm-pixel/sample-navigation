@@ -112,10 +112,10 @@ class NavigationViewModel @Inject constructor(
                 Timber.d("🔄 Rerouting from $currentLocation to $destination, option=$routeOption")
                 
                 navigationRepository.getPathWithCoordinates(
-                    currentLocation.latitude,
-                    currentLocation.longitude,
-                    destination,
-                    routeOption
+                    startLat = currentLocation.latitude,
+                    startLng = currentLocation.longitude,
+                    endAddress = destination,
+                    routeOption = routeOption
                 ).collect { result ->
                     result.onSuccess { resultPath ->
                         val navigationRoute = NavigationMapper.mapToNavigationRoute(resultPath)

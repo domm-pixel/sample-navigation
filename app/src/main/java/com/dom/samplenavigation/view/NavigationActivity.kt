@@ -12,6 +12,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.PointF
 import android.graphics.drawable.Icon
 import android.location.Location
 import android.os.Bundle
@@ -44,6 +45,7 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.naver.maps.geometry.LatLng
+import com.naver.maps.geometry.LatLngBounds
 import com.naver.maps.map.CameraAnimation
 import com.naver.maps.map.CameraUpdate
 import com.naver.maps.map.CameraPosition
@@ -57,6 +59,7 @@ import com.naver.maps.map.overlay.Marker
 import com.naver.maps.map.overlay.Overlay
 import com.naver.maps.map.overlay.OverlayImage
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.text.SimpleDateFormat
@@ -98,19 +101,28 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var lastRerouteTime: Long = 0
     private var selectedRouteOption: RouteOptionType? = null  // 선택된 경로 옵션
     private var isShowingFullRoute = false  // 전체 경로 표시 여부
-    private var isUserGestureMode = false  // 유저 제스처 모드 (지도 조작 중)
-    private var lastUserGestureTime: Long = 0  // 마지막 유저 제스처 시간
-    private var autoFollowResumeJob: kotlinx.coroutines.Job? = null  // 자동 추적 복귀 작업
+    private var isGestureMode = false  // 유저 제스처 모드 (지도 조작 중)
+    private var lastGestureTime: Long = 0  // 마지막 유저 제스처 시간
+    private var gestureTimeoutJob: Job? = null  // 제스처 타임아웃 작업
 
     // Simulation Mode
     private var isSimulationMode: Boolean = false  // 시뮬레이션 모드 플래그
-    private var simulationJob: kotlinx.coroutines.Job? = null  // 시뮬레이션 코루틴 작업
+    private var simulationJob: Job? = null  // 시뮬레이션 코루틴 작업
 
     // Camera State (OMS 스타일)
     private var currentBearing: Float = 0f
     private var currentSpeed: Float = 0f
     private var currentZoom: Double = 17.0
     private var currentTilt: Double = 0.0
+
+    // 네비게이션 모드의 마지막 카메라 상태 (제스처 모드 복귀 시 사용)
+    private var lastNavigationZoom: Double = 17.0
+    private var lastNavigationTilt: Double = 10.0
+    private var lastNavigationBearing: Float = 0f
+    private var lastBearing: Float = 0f  // 일반 베어링 (경로 기반 계산용)
+    
+    // Content Padding (전체 경로 표시 시 패딩 제거를 위해 저장)
+    private var originalTopPadding: Int = 0
 
     // Location
     private lateinit var fusedClient: FusedLocationProviderClient
@@ -131,6 +143,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     Timber.d("PIP action: stop navigation")
                     stopNavigationAndFinish()
                 }
+
                 ACTION_PIP_TOGGLE_VOICE -> {
                     Timber.d("PIP action: toggle voice guide")
                     toggleVoiceGuideFromPip()
@@ -141,33 +154,34 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     companion object {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1001
-        
+
         // OMS 스타일 상수
         private const val SNAP_TOLERANCE_M = 50f  // 경로 스냅 허용 거리 (미터)
         private const val OFF_ROUTE_THRESHOLD_M = 35f  // 경로 이탈 임계값 (미터)
         private const val REROUTE_COOLDOWN_MS = 5000L  // 재탐색 쿨다운 (밀리초)
         private const val ARRIVAL_THRESHOLD_M = 30f  // 도착 판정 거리 (미터)
-        
+
         // Camera 상수
         private const val ZOOM_LOW_SPEED = 18.0  // 저속 줌
         private const val ZOOM_DEFAULT = 17.0  // 기본 줌
         private const val ZOOM_HIGH_SPEED = 16.0  // 고속 줌
         private const val SPEED_THRESHOLD_SLOW = 4.2f  // ≈15km/h
         private const val SPEED_THRESHOLD_FAST = 13.9f  // ≈50km/h
-        private const val HIGH_SPEED_TILT = 35.0
-        private const val DEFAULT_TILT = 10.0
+        private const val HIGH_SPEED_TILT = 45.0
+        private const val DEFAULT_TILT = 30.0
         private const val BEARING_SMOOTH_ALPHA = 0.3f  // 베어링 스무딩 계수
-        
+
         // Simulation 상수
         private const val SIMULATION_UPDATE_INTERVAL_MS = 800L  // 시뮬레이션 업데이트 간격 (밀리초)
         private const val SIMULATION_SPEED_KMH = 50f  // 시뮬레이션 속도 (km/h)
-        
+
         // User Gesture 상수
-        private const val USER_GESTURE_TIMEOUT_MS = 5000L  // 유저 제스처 후 자동 복귀 시간 (5초)
-        
+        private const val GESTURE_TIMEOUT = 10000L  // 유저 제스처 후 자동 복귀 시간 (10초)
+
         // PIP
         private const val ACTION_PIP_STOP_NAVIGATION = "com.dom.samplenavigation.action.PIP_STOP"
-        private const val ACTION_PIP_TOGGLE_VOICE = "com.dom.samplenavigation.action.PIP_TOGGLE_VOICE"
+        private const val ACTION_PIP_TOGGLE_VOICE =
+            "com.dom.samplenavigation.action.PIP_TOGGLE_VOICE"
         private const val REQUEST_CODE_PIP_STOP = 2001
         private const val REQUEST_CODE_PIP_TOGGLE_VOICE = 2002
     }
@@ -191,8 +205,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 시뮬레이션 모드 플래그 (기본값: false)
         isSimulationMode = intent.getBooleanExtra("simulation_mode", false)
         // 경로 옵션 (기본값: TRAOPTIMAL)
-        val routeOptionOrdinal = intent.getIntExtra("route_option", RouteOptionType.TRAOPTIMAL.ordinal)
-        selectedRouteOption = RouteOptionType.values().getOrNull(routeOptionOrdinal) ?: RouteOptionType.TRAOPTIMAL
+        val routeOptionOrdinal =
+            intent.getIntExtra("route_option", RouteOptionType.TRAOPTIMAL.ordinal)
+        selectedRouteOption =
+            RouteOptionType.entries.getOrNull(routeOptionOrdinal) ?: RouteOptionType.TRAOPTIMAL
 
         if (startLat != 0.0 && startLng != 0.0 && !destination.isNullOrEmpty()) {
             val startLocation = LatLng(startLat, startLng)
@@ -235,6 +251,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 운전자 시야 확보를 위해 지도 중심을 화면 하단 쪽으로 오프셋
         val density = resources.displayMetrics.density
         val topPaddingPx = (600 * density).toInt()
+        originalTopPadding = topPaddingPx  // 원래 패딩 값 저장
         naverMap.setContentPadding(0, topPaddingPx, 0, 0)
 
         // 현재 위치 마커 생성
@@ -254,101 +271,201 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      * 사용자가 지도를 조작할 때 감지하여 자동 추적을 중지하고 혼잡도를 표시
      */
     private fun setupMapGestureListeners(map: NaverMap) {
-        // 카메라 변경 감지 (줌, 팬, 틸트 등)
-        map.addOnCameraChangeListener { reason, animated ->
-            // reason이 0이면 프로그래밍 방식, 1 이상이면 사용자 제스처
-            if (reason > 0) {
-                onUserGestureDetected()
-            }
+        // 지도 클릭 감지
+        map.setOnMapClickListener { _, _ ->
+            handleUserGesture()
         }
 
-        // 지도 클릭 감지
-        map.setOnMapClickListener { pointF, latLng ->
-            onUserGestureDetected()
+        // 지도 롱클릭 감지
+        map.setOnMapLongClickListener { _, _ ->
+            handleUserGesture()
+            true  // 이벤트 소비
+        }
+
+        // 카메라 변경 감지 (줌, 팬, 틸트 등)
+        map.addOnCameraChangeListener { reason, _ ->
+            // 제스처로 인한 카메라 변경 감지
+            // NaverMap SDK의 카메라 변경 이유는 정수로 반환됨
+            if (reason == CameraUpdate.REASON_GESTURE) {
+                handleUserGesture()
+            }
         }
     }
 
     /**
-     * 유저 제스처 감지 처리
-     * 자동 추적을 중지하고 전체 경로를 혼잡도별로 표시
+     * 사용자 제스처 처리
      */
-    private fun onUserGestureDetected() {
-        if (!isNavigating || currentRoute == null) return
+    private fun handleUserGesture() {
+        if (!isNavigating) return
 
         val currentTime = System.currentTimeMillis()
-        lastUserGestureTime = currentTime
-
-        // 이미 제스처 모드면 무시
-        if (isUserGestureMode) {
-            // 자동 복귀 타이머 리셋
-            scheduleAutoFollowResume()
-            return
-        }
 
         // 제스처 모드 활성화
-        isUserGestureMode = true
-        isShowingFullRoute = true
+        if (!isGestureMode) {
+            isGestureMode = true
+            lastGestureTime = currentTime
+            enterGestureMode()
+            Timber.d("User gesture detected - entering gesture mode")
+        } else {
+            // 제스처 모드가 이미 활성화된 경우 시간 갱신
+            lastGestureTime = currentTime
+        }
+    }
 
-        Timber.d("User gesture detected - entering gesture mode")
-
-        // 전체 경로를 혼잡도별로 표시
+    /**
+     * 제스처 모드 진입
+     */
+    private fun enterGestureMode() {
+        // 교통량 표시로 전환
         currentRoute?.let { route ->
-            displayRoute(route, showFullRoute = true)
+            displayRouteWithCongestion(route, naverMap ?: return)
+        }
+
+        // 자동 추적 비활성화
+        naverMap?.let { map ->
+            map.locationTrackingMode = LocationTrackingMode.None
         }
 
         // 버튼 텍스트 변경
         binding.btnReturnToCurrentLocation.text = "현위치로"
         binding.btnReturnToCurrentLocation.visibility = View.VISIBLE
 
-        // 자동 복귀 스케줄링 (5초 후 자동으로 추적 모드로 복귀)
-        scheduleAutoFollowResume()
+        // 10초 후 자동 복귀 타이머 시작
+        startGestureTimeoutTimer()
+
+        Timber.d("Entered gesture mode - congestion display enabled, auto tracking disabled")
     }
 
     /**
-     * 자동 추적 복귀 스케줄링
-     * 일정 시간 후 자동으로 추적 모드로 복귀
+     * 현재 위치 모드로 복귀
      */
-    private fun scheduleAutoFollowResume() {
-        // 기존 작업 취소
-        autoFollowResumeJob?.cancel()
+    private fun returnToCurrentLocationMode() {
+        Timber.d("returnToCurrentLocationMode() called")
+        Timber.d("Current state - isGestureMode: $isGestureMode, isNavigating: ${navigationManager.navigationState.value?.isNavigating}, currentLocation: ${navigationManager.navigationState.value?.currentLocation}")
 
-        // 새 작업 스케줄링
-        autoFollowResumeJob = lifecycleScope.launch {
-            kotlinx.coroutines.delay(USER_GESTURE_TIMEOUT_MS)
-
-            // 제스처 모드가 여전히 활성화되어 있고, 최근 제스처가 없으면 복귀
-            if (isUserGestureMode) {
-                val timeSinceLastGesture = System.currentTimeMillis() - lastUserGestureTime
-                if (timeSinceLastGesture >= USER_GESTURE_TIMEOUT_MS) {
-                    resumeAutoFollow()
-                }
-            }
-        }
-    }
-
-    /**
-     * 자동 추적 모드로 복귀
-     */
-    private fun resumeAutoFollow() {
-        if (!isUserGestureMode) return
-
-        isUserGestureMode = false
+        isGestureMode = false
         isShowingFullRoute = false
 
-        Timber.d("Resuming auto follow mode")
+        // 원래 패딩 복원 (네비게이션 모드용)
+        naverMap?.setContentPadding(0, originalTopPadding, 0, 0)
 
-        // 경로를 앞부분만 표시로 변경
+        // 단색 경로로 복귀
         currentRoute?.let { route ->
             displayRoute(route, showFullRoute = false)
+            Timber.d("Route displayed (single color)")
         }
 
-        // 현재 위치로 카메라 복귀
-        snappedLocation?.let { location ->
-            updateCameraFollow(location, currentBearing, currentSpeed)
+        // 네비게이션 모드 재활성화
+        if (navigationManager.navigationState.value?.isNavigating == true) {
+            startNavigationMode()
+            Timber.d("Navigation mode reactivated")
+        }
+
+        // 현재 위치로 카메라 이동 (저장된 줌과 방향 유지)
+        val currentLocation = navigationManager.navigationState.value?.currentLocation
+        val currentRoute = navigationManager.navigationState.value?.currentRoute
+
+        if (currentLocation != null && naverMap != null) {
+            Timber.d("Moving camera to current location: $currentLocation")
+            val bearing = if (lastNavigationBearing > 0) {
+                Timber.d("Using last navigation bearing: $lastNavigationBearing")
+                lastNavigationBearing
+            } else {
+                // 방향이 없으면 경로 기반으로 계산
+                if (currentRoute != null && currentPathIndex < currentRoute.path.size - 1) {
+                    val pathBearing = calculateBearingFromPath(currentRoute.path, currentPathIndex)
+                    Timber.d("Calculated bearing from path: $pathBearing")
+                    pathBearing
+                } else {
+                    Timber.d("Using last bearing: $lastBearing")
+                    lastBearing
+                }
+            }
+
+            val cameraPosition = CameraPosition(
+                currentLocation,
+                lastNavigationZoom,
+                lastNavigationTilt,
+                bearing.toDouble()
+            )
+            val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
+                .animate(CameraAnimation.Easing, 200)
+            naverMap?.moveCamera(cameraUpdate)
+
+            Timber.d("Camera moved to current location - zoom=${lastNavigationZoom}, bearing=$bearing°")
+        } else {
+            // 현재 위치가 없으면 경로의 시작점으로 이동
+            if (currentRoute != null && naverMap != null) {
+                val startLocation = if (currentPathIndex < currentRoute.path.size) {
+                    currentRoute.path[currentPathIndex]
+                } else {
+                    currentRoute.summary.startLocation
+                }
+
+                Timber.w("Current location is null, using route location: $startLocation")
+                val bearing = if (lastNavigationBearing > 0) {
+                    lastNavigationBearing
+                } else if (currentPathIndex < currentRoute.path.size - 1) {
+                    calculateBearingFromPath(currentRoute.path, currentPathIndex)
+                } else {
+                    lastBearing
+                }
+
+                val cameraPosition = CameraPosition(
+                    startLocation,
+                    lastNavigationZoom,
+                    lastNavigationTilt,
+                    bearing.toDouble()
+                )
+                val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
+                    .animate(CameraAnimation.Easing, 200)
+                naverMap?.moveCamera(cameraUpdate)
+
+                Timber.d("Camera moved to route location: $startLocation")
+            } else {
+                Timber.e("Cannot return to location - currentLocation: null, currentRoute: ${currentRoute != null}, naverMap: ${naverMap != null}")
+                Toast.makeText(this, "현재 위치를 가져올 수 없습니다. GPS를 확인해주세요.", Toast.LENGTH_SHORT).show()
+            }
         }
 
         // 버튼 텍스트 변경
         binding.btnReturnToCurrentLocation.text = "전체 경로"
+
+        Timber.d("Returned to current location mode complete")
+    }
+
+    /**
+     * 제스처 모드 자동 복귀 타이머
+     */
+    private fun startGestureTimeoutTimer() {
+        // 기존 타이머 취소
+        gestureTimeoutJob?.cancel()
+
+        // 새 타이머 시작
+        gestureTimeoutJob = lifecycleScope.launch {
+            kotlinx.coroutines.delay(GESTURE_TIMEOUT)
+
+            // 제스처 모드가 여전히 활성화되어 있고, 최근 제스처가 없으면 복귀
+            if (isGestureMode) {
+                val timeSinceLastGesture = System.currentTimeMillis() - lastGestureTime
+                if (timeSinceLastGesture >= GESTURE_TIMEOUT) {
+                    returnToCurrentLocationMode()
+                }
+            }
+        }
+
+        Timber.d("Gesture timeout timer started (${GESTURE_TIMEOUT}ms)")
+    }
+
+    /**
+     * 경로에서 베어링 계산
+     */
+    private fun calculateBearingFromPath(path: List<LatLng>, currentIndex: Int): Float {
+        if (currentIndex >= path.size - 1) return lastBearing
+
+        val currentPoint = path[currentIndex]
+        val nextPoint = path[currentIndex + 1]
+        return calculateBearing(currentPoint, nextPoint)
     }
 
     @SuppressLint("MissingPermission")
@@ -370,7 +487,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             }
 
             // OMS 스타일: Location Snapping 및 Camera Follow
-            if (state.isNavigating && isNavigating && state.currentLocation != null && state.currentRoute != null) {
+            // 시뮬레이션 모드가 아닐 때만 스냅 로직 실행 (시뮬레이션은 직접 인덱스 제어)
+            if (state.isNavigating && isNavigating && state.currentLocation != null && state.currentRoute != null && !isSimulationMode) {
                 val gpsLocation = state.currentLocation
                 val route = state.currentRoute
 
@@ -383,13 +501,19 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     // 2. 경로 이탈 감지 및 재탐색
                     val distanceToPath = calculateDistance(gpsLocation, snappedLocation!!)
                     if (distanceToPath > OFF_ROUTE_THRESHOLD_M && !isRerouting) {
-                        checkAndReroute(gpsLocation, route)
+                        checkAndReroute(gpsLocation)
                     }
 
                     // 3. Camera Follow: 스냅된 위치로 카메라 추적 (제스처 모드가 아닐 때만)
-                    if (snappedLocation != null && !isUserGestureMode) {
+                    if (snappedLocation != null && !isGestureMode) {
                         updateCameraFollow(snappedLocation!!, currentBearing, currentSpeed)
                         updateCurrentLocationMarker(snappedLocation!!)
+
+                        // 네비게이션 모드의 카메라 상태 저장
+                        lastNavigationZoom = currentZoom
+                        lastNavigationTilt = currentTilt
+                        lastNavigationBearing = currentBearing
+                        lastBearing = currentBearing
                     } else if (snappedLocation != null) {
                         // 제스처 모드일 때는 마커만 업데이트
                         updateCurrentLocationMarker(snappedLocation!!)
@@ -457,7 +581,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 if (isRerouting) {
                     isRerouting = false
                     Toast.makeText(this, "경로를 재검색했습니다", Toast.LENGTH_SHORT).show()
-                    
+
                     // 재탐색 후 스냅 위치 초기화
                     val referenceLocation = lastKnownLocation ?: newRoute.summary.startLocation
                     val snapResult = snapLocationToRoute(referenceLocation, newRoute.path, 0)
@@ -517,18 +641,20 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      * 전체 경로 표시 토글
      */
     private fun toggleFullRouteView() {
-        if (isShowingFullRoute) {
+        if (isShowingFullRoute || isGestureMode) {
             // 현재 위치로 복귀
-            resumeAutoFollow()
+            returnToCurrentLocationMode()
         } else {
-            // 전체 경로 표시
+            // 전체 경로 표시 (제스처 모드 진입)
+            handleUserGesture()
+
+            // 전체 경로 표시 시 패딩 제거 (MainActivity와 동일한 바운더리 계산을 위해)
+            naverMap?.setContentPadding(0, 0, 0, 0)
             isShowingFullRoute = true
-            isUserGestureMode = true
+
+            // 전체 경로 표시 시 카메라를 전체 경로에 맞춤
             currentRoute?.let { route ->
-                displayRoute(route, showFullRoute = true)
-                
-                // 전체 경로 표시 시 카메라를 전체 경로에 맞춤
-                val bounds = com.naver.maps.geometry.LatLngBounds.Builder()
+                val bounds = LatLngBounds.Builder()
                     .include(route.summary.startLocation)
                     .include(route.summary.endLocation)
                     .apply {
@@ -537,12 +663,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                         }
                     }
                     .build()
-                naverMap?.moveCamera(CameraUpdate.fitBounds(bounds, 100))
-                binding.btnReturnToCurrentLocation.text = "현위치로"
+                // MainActivity와 동일한 패딩 사용
+                naverMap?.moveCamera(CameraUpdate.fitBounds(bounds, 150))
             }
-            
-            // 자동 복귀 스케줄링
-            scheduleAutoFollowResume()
         }
     }
 
@@ -587,7 +710,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             if (distance < minDistance) {
                 minDistance = distance
                 bestSnappedLocation = snapped
-                bestIndex = if (calculateDistance(snapped, p1) < calculateDistance(snapped, p2)) i else i + 1
+                bestIndex = if (calculateDistance(snapped, p1) < calculateDistance(
+                        snapped,
+                        p2
+                    )
+                ) i else i + 1
             }
         }
 
@@ -629,10 +756,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      * 속도와 방향에 따라 부드럽게 카메라 업데이트
      */
     private fun updateCameraFollow(location: LatLng, bearing: Float, speed: Float) {
+        if(isGestureMode) {
+            return
+        }
         naverMap?.let { map ->
             // 속도 기반 줌 계산
             val zoom = calculateZoomFromSpeed(speed)
-            
+
             // 속도 기반 틸트 계산
             val tilt = calculateTiltFromSpeed(speed)
 
@@ -647,11 +777,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 smoothedBearing.toDouble()
             )
 
-            if(!isUserGestureMode) {
-                val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
-                    .animate(CameraAnimation.Easing, 200)
-                map.moveCamera(cameraUpdate)
-            }
+            val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
+                .animate(CameraAnimation.Easing, 200)
+            map.moveCamera(cameraUpdate)
+
             // 상태 저장
             currentZoom = zoom
             currentTilt = tilt
@@ -698,7 +827,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      * 경로 이탈 감지 및 재탐색 (OMS 스타일)
      * 한국 도로는 우측 통행이므로 재탐색 위치를 약간 오른쪽으로 이동
      */
-    private fun checkAndReroute(gpsLocation: LatLng, route: NavigationRoute) {
+    private fun checkAndReroute(gpsLocation: LatLng) {
         val currentTime = System.currentTimeMillis()
         val timeSinceLastReroute = currentTime - lastRerouteTime
 
@@ -715,11 +844,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         isRerouting = true
         lastRerouteTime = currentTime
         Timber.d("Rerouting triggered from: $gpsLocation -> $rerouteLocation (offset to right)")
-        
+
         if (voiceGuideManager.isReady()) {
             voiceGuideManager.speakPlain("경로를 재탐색합니다")
         }
-        
+
         navigationViewModel.reroute(rerouteLocation)
         binding.tvCurrentInstruction.text = "경로를 재검색 중입니다..."
     }
@@ -731,17 +860,22 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      * @param offsetMeters 오른쪽으로 이동할 거리 (미터)
      * @return 오른쪽으로 이동한 위치
      */
-    private fun offsetLocationToRight(location: LatLng, bearing: Float, offsetMeters: Double): LatLng {
+    private fun offsetLocationToRight(
+        location: LatLng,
+        bearing: Float,
+        offsetMeters: Double = 10.0
+    ): LatLng {
         // 베어링을 라디안으로 변환
         val bearingRad = Math.toRadians(bearing.toDouble())
-        
+
         // 오른쪽 방향 = 베어링 - 90도
         val rightBearingRad = bearingRad - Math.PI / 2
-        
+
         // 위도 1도 ≈ 111km, 경도는 위도에 따라 다름
         val latOffset = offsetMeters / 111000.0 * cos(rightBearingRad)
-        val lngOffset = offsetMeters / (111000.0 * cos(Math.toRadians(location.latitude))) * sin(rightBearingRad)
-        
+        val lngOffset =
+            offsetMeters / (111000.0 * cos(Math.toRadians(location.latitude))) * sin(rightBearingRad)
+
         return LatLng(
             location.latitude + latOffset,
             location.longitude + lngOffset
@@ -781,7 +915,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     private fun updateNavigationUI(state: NavigationState) {
         if (!isInPictureInPictureModeCompat) {
-            binding.btnStopNavigation.visibility = if (state.isNavigating) View.VISIBLE else View.GONE
+            binding.btnStopNavigation.visibility =
+                if (state.isNavigating) View.VISIBLE else View.GONE
         }
 
         // 진행률 업데이트
@@ -810,6 +945,55 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         binding.tvRemainingDistance.text = "남은 거리: ${String.format("%.1f", distanceKm)}km"
         binding.tvRemainingTime.text = "남은 시간: $timeString"
+
+        // 다음 안내 메시지 업데이트
+        updateNextInstructionUI(state.nextInstruction)
+    }
+
+    /**
+     * 다음 안내 메시지 UI 업데이트
+     */
+    private fun updateNextInstructionUI(nextInstruction: Instruction?) {
+        if (nextInstruction == null) {
+            binding.tvNextInstruction.text = ""
+            binding.tvNextInstruction.visibility = View.GONE
+            return
+        }
+
+        binding.tvNextInstruction.visibility = View.VISIBLE
+
+        val route = currentRoute ?: return
+        val currentPos = snappedLocation ?: lastKnownLocation ?: return
+
+        // 다음 안내까지의 거리 계산
+        val targetIndex = nextInstruction.pointIndex.coerceIn(0, route.path.size - 1)
+        val distance = if (currentPathIndex < targetIndex) {
+            calculateRouteDistance(currentPathIndex, targetIndex, route.path)
+        } else {
+            calculateDistance(currentPos, nextInstruction.location)
+        }
+
+        // 메시지에서 거리 정보 제거 (이미 거리를 표시할 것이므로)
+        val cleanMessage = nextInstruction.message
+            .replace(Regex("\\d+\\s*킬로미터\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\s*미터\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\.?\\d*\\s*km\\s*(후|전방|앞)\\s*"), "")
+            .replace(Regex("\\d+\\s*m\\s*(후|전방|앞)\\s*"), "")
+            .trim()
+
+        // 다음 안내 메시지에 거리 정보 추가
+        val messageWithDistance = if (distance > 0) {
+            if (distance >= 1000) {
+                val km = distance / 1000.0
+                "[${String.format("%.1f", km)}km] $cleanMessage"
+            } else {
+                "[${distance.toInt()}m] $cleanMessage"
+            }
+        } else {
+            cleanMessage
+        }
+
+        binding.tvNextInstruction.text = messageWithDistance
     }
 
     private fun updateInstructionUI(instruction: Instruction) {
@@ -890,15 +1074,15 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 혼잡도에 따라 경로를 구간별로 나눠서 표시
         val groupedPaths = mutableListOf<Pair<List<LatLng>, Int>>()
         val sortedSections = route.sections.sortedBy { it.pointIndex }
-        
+
         var currentCongestion: Int? = null
         var currentPathGroup = mutableListOf<LatLng>()
         var lastEndIndex = 0
-        
+
         sortedSections.forEachIndexed { index, section ->
             val startIndex = section.pointIndex
             val endIndex = minOf(startIndex + section.pointCount, route.path.size)
-            
+
             // 첫 섹션 이전의 경로 처리
             if (index == 0 && startIndex > 0) {
                 val beforePath = route.path.subList(0, startIndex)
@@ -907,7 +1091,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     groupedPaths.add(Pair(beforePath, firstCongestion))
                 }
             }
-            
+
             // 섹션 사이의 빈 구간 처리
             if (startIndex > lastEndIndex) {
                 val gapPath = route.path.subList(lastEndIndex, startIndex)
@@ -916,10 +1100,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     groupedPaths.add(Pair(gapPath, gapCongestion))
                 }
             }
-            
+
             // 현재 섹션의 경로 처리
             val sectionPath = route.path.subList(startIndex, endIndex)
-            
+
             if (section.congestion == currentCongestion) {
                 currentPathGroup.addAll(sectionPath)
             } else {
@@ -929,24 +1113,25 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 currentPathGroup = sectionPath.toMutableList()
                 currentCongestion = section.congestion
             }
-            
+
             lastEndIndex = endIndex
         }
-        
+
         // 마지막 그룹 저장
         if (currentPathGroup.size >= 2 && currentCongestion != null) {
             groupedPaths.add(Pair(currentPathGroup, currentCongestion))
         }
-        
+
         // 마지막 섹션 이후의 남은 경로 처리
         if (lastEndIndex < route.path.size) {
             val remainingPath = route.path.subList(lastEndIndex, route.path.size)
             if (remainingPath.isNotEmpty() && remainingPath.size >= 2) {
-                val lastCongestion = currentCongestion ?: sortedSections.lastOrNull()?.congestion ?: 1
+                val lastCongestion =
+                    currentCongestion ?: sortedSections.lastOrNull()?.congestion ?: 1
                 groupedPaths.add(Pair(remainingPath, lastCongestion))
             }
         }
-        
+
         // 그룹화된 경로들을 PathOverlay로 표시
         groupedPaths.forEach { (path, congestion) ->
             val overlay = PathOverlay().apply {
@@ -967,7 +1152,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 현재 위치 이후의 경로만 표시
         val startIndex = currentPathIndex.coerceIn(0, route.path.size - 1)
         val pathAhead = route.path.subList(startIndex, route.path.size)
-        
+
         if (pathAhead.size >= 2) {
             pathOverlays.add(PathOverlay().apply {
                 coords = pathAhead
@@ -1000,6 +1185,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             icon = OverlayImage.fromResource(R.drawable.a)
             position = LatLng(37.5665, 126.9780)
             this.map = map
+            anchor = PointF(0.5f, 0.5f)
             zIndex = 10000
             width = 150
             height = 150
@@ -1089,7 +1275,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 lastKnownLocation = latLng
                 lastLocation = it
                 navigationManager.updateCurrentLocation(latLng)
-                
+
                 // Telemetry API 호출 (시뮬레이션이 아닐 때만)
                 sendLocationTelemetry(it)
             }
@@ -1172,6 +1358,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 }
 
                 // NavigationManager에 시뮬레이션 위치 업데이트
+                // 주의: 이 호출은 setupObservers의 navigationState.observe를 트리거하지만,
+                // 시뮬레이션 모드에서는 스냅 로직이 실행되지 않으므로 currentPathIndex가 유지됩니다
                 navigationManager.updateCurrentLocation(nextLocation)
 
                 // 카메라 업데이트
@@ -1191,7 +1379,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     Timber.d("Simulation arrived at destination!")
                     navigationManager.stopNavigation()
                     stopSimulation()
-                    Toast.makeText(this@NavigationActivity, "목적지에 도착했습니다!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@NavigationActivity, "목적지에 도착했습니다!", Toast.LENGTH_SHORT)
+                        .show()
                     break
                 }
 
@@ -1269,7 +1458,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         // 분기점 기준으로 -1, 0(분기점), +1 → 최대 3개의 점 사용
         val startIndex = maxOf(0, pointIndex - 1)
-        val endIndexExclusive = minOf(path.size, pointIndex + 2) // +2 (exclusive) → pointIndex+1까지 포함
+        val endIndexExclusive =
+            minOf(path.size, pointIndex + 2) // +2 (exclusive) → pointIndex+1까지 포함
 
         val arrowPath = path.subList(startIndex, endIndexExclusive).toList()
 
@@ -1587,14 +1777,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private fun stopNavigationAndFinish() {
         isNavigating = false
         currentPathIndex = 0
-        
+
         // 시뮬레이션 중지
         stopSimulation()
-        
+
         // 화살표 제거
         directionArrowOverlay?.map = null
         directionArrowOverlay = null
-        
+
         navigationManager.stopNavigation()
         navigationViewModel.stopNavigation()
         finish()
@@ -1605,7 +1795,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         super.onDestroy()
         stopNavigationMode()
         stopSimulation()  // 시뮬레이션 중지
-        autoFollowResumeJob?.cancel()  // 자동 복귀 작업 취소
+        gestureTimeoutJob?.cancel()  // 제스처 타임아웃 작업 취소
         navigationManager.stopNavigation()
         voiceGuideManager.release()
 

@@ -10,11 +10,8 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
 import android.view.View
-import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
 import androidx.activity.viewModels
-import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.dom.samplenavigation.R
@@ -578,56 +575,5 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         
         Timber.d("🔄 Route and destination cleared")
     }
-    
-    /**
-     * 경로 정보 다이얼로그 표시 (비용 정보 포함)
-     */
-    private fun showRouteInfoDialog(route: NavigationRoute) {
-        val distanceKm = route.summary.totalDistance / 1000.0
-        
-        // API에서 제공하는 duration 사용 (밀리초 단위)
-        val durationMin = route.summary.totalDuration / 1000 / 60
-        
-        val tollFare = route.summary.tollFare
-//        val fuelPrice = route.summary.fuelPrice
-//        val taxiFare = route.summary.taxiFare
 
-        val message = buildString {
-            append("거리: ${String.format("%.1f", distanceKm)}km\n")
-            
-            // 시간 표시 개선 (1시간 이상일 때 "X시간 Y분"으로 표시)
-            val timeString = if (durationMin >= 60) {
-                val hours = durationMin / 60
-                val mins = durationMin % 60
-                if (mins > 0) "${hours}시간 ${mins}분" else "${hours}시간"
-            } else {
-                "${durationMin}분"
-            }
-            append("⏱️ 소요 시간: 약 ${timeString}\n\n")
-
-            // 비용 정보
-//            var hasCost = false
-            if (tollFare > 0) {// || fuelPrice > 0 || taxiFare > 0) {
-                append("💰 예상 비용:\n")
-                if (tollFare > 0) {
-                    append("   • 통행료: ${String.format("%,d", tollFare)}원\n")
-//                    hasCost = true
-                }
-//                if (fuelPrice > 0) {
-//                    append("   • 유류비: ${String.format("%,d", fuelPrice)}원\n")
-//                    hasCost = true
-//                }
-//                if (taxiFare > 0) {
-//                    append("   • 택시 요금: ${String.format("%,d", taxiFare)}원\n")
-//                    hasCost = true
-//                }
-            }
-        }
-        
-        AlertDialog.Builder(this)
-            .setTitle("경로 정보")
-            .setMessage(message)
-            .setPositiveButton("확인", null)
-            .show()
-    }
 }
