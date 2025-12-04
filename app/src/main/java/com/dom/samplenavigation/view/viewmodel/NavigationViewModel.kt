@@ -9,6 +9,7 @@ import com.dom.samplenavigation.api.telemetry.repo.TelemetryRepository
 import com.dom.samplenavigation.base.BaseViewModel
 import com.dom.samplenavigation.navigation.mapper.NavigationMapper
 import com.dom.samplenavigation.navigation.model.NavigationRoute
+import com.dom.samplenavigation.navigation.model.RouteOptionType
 import com.naver.maps.geometry.LatLng
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
@@ -29,6 +30,7 @@ class NavigationViewModel @Inject constructor(
 
     private var startLocation: LatLng? = null
     private var destinationAddress: String? = null
+    private var selectedRouteOption: RouteOptionType? = null  // 선택된 경로 옵션 저장
 
     fun startNavigation() {
         val start = startLocation
@@ -80,14 +82,16 @@ class NavigationViewModel @Inject constructor(
         Timber.d("🛑 Navigation stopped")
     }
 
-    fun setRoute(start: LatLng, destination: String) {
+    fun setRoute(start: LatLng, destination: String, routeOption: RouteOptionType? = null) {
         startLocation = start
         destinationAddress = destination
-        Timber.d("Route set: $start -> $destination")
+        selectedRouteOption = routeOption
+        Timber.d("Route set: $start -> $destination, option=$routeOption")
     }
 
     /**
      * 경로 재검색 (현재 위치에서 목적지로 새 경로 검색)
+     * 선택된 경로 옵션을 사용하여 재탐색합니다.
      */
     fun reroute(currentLocation: LatLng) {
         val destination = destinationAddress
@@ -102,12 +106,16 @@ class NavigationViewModel @Inject constructor(
                 _isLoading.value = true
                 _errorMessage.value = null
                 
-                Timber.d("🔄 Rerouting from $currentLocation to $destination")
+                // 선택된 경로 옵션 사용 (없으면 기본값)
+                val routeOption = selectedRouteOption?.apiKey
+                
+                Timber.d("🔄 Rerouting from $currentLocation to $destination, option=$routeOption")
                 
                 navigationRepository.getPathWithCoordinates(
                     currentLocation.latitude,
                     currentLocation.longitude,
-                    destination
+                    destination,
+                    routeOption
                 ).collect { result ->
                     result.onSuccess { resultPath ->
                         val navigationRoute = NavigationMapper.mapToNavigationRoute(resultPath)

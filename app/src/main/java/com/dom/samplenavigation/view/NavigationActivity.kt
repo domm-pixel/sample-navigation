@@ -33,6 +33,7 @@ import com.dom.samplenavigation.navigation.manager.NavigationManager
 import com.dom.samplenavigation.navigation.model.Instruction
 import com.dom.samplenavigation.navigation.model.NavigationRoute
 import com.dom.samplenavigation.navigation.model.NavigationState
+import com.dom.samplenavigation.navigation.model.RouteOptionType
 import com.dom.samplenavigation.navigation.voice.VoiceGuideManager
 import com.dom.samplenavigation.view.viewmodel.NavigationViewModel
 import com.dom.samplenavigation.api.telemetry.model.VehicleLocationPayload
@@ -95,9 +96,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var isNavigating = false
     private var isRerouting = false
     private var lastRerouteTime: Long = 0
+    private var selectedRouteOption: RouteOptionType? = null  // 선택된 경로 옵션
+    private var isShowingFullRoute = false  // 전체 경로 표시 여부
+    private var isUserGestureMode = false  // 유저 제스처 모드 (지도 조작 중)
+    private var lastUserGestureTime: Long = 0  // 마지막 유저 제스처 시간
+    private var autoFollowResumeJob: kotlinx.coroutines.Job? = null  // 자동 추적 복귀 작업
 
     // Simulation Mode
-    private var isSimulationMode: Boolean = true  // 시뮬레이션 모드 플래그
+    private var isSimulationMode: Boolean = false  // 시뮬레이션 모드 플래그
     private var simulationJob: kotlinx.coroutines.Job? = null  // 시뮬레이션 코루틴 작업
 
     // Camera State (OMS 스타일)
@@ -138,7 +144,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         
         // OMS 스타일 상수
         private const val SNAP_TOLERANCE_M = 50f  // 경로 스냅 허용 거리 (미터)
-        private const val OFF_ROUTE_THRESHOLD_M = 50f  // 경로 이탈 임계값 (미터)
+        private const val OFF_ROUTE_THRESHOLD_M = 35f  // 경로 이탈 임계값 (미터)
         private const val REROUTE_COOLDOWN_MS = 5000L  // 재탐색 쿨다운 (밀리초)
         private const val ARRIVAL_THRESHOLD_M = 30f  // 도착 판정 거리 (미터)
         
@@ -149,12 +155,15 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         private const val SPEED_THRESHOLD_SLOW = 4.2f  // ≈15km/h
         private const val SPEED_THRESHOLD_FAST = 13.9f  // ≈50km/h
         private const val HIGH_SPEED_TILT = 35.0
-        private const val DEFAULT_TILT = 0.0
+        private const val DEFAULT_TILT = 10.0
         private const val BEARING_SMOOTH_ALPHA = 0.3f  // 베어링 스무딩 계수
         
         // Simulation 상수
         private const val SIMULATION_UPDATE_INTERVAL_MS = 800L  // 시뮬레이션 업데이트 간격 (밀리초)
         private const val SIMULATION_SPEED_KMH = 50f  // 시뮬레이션 속도 (km/h)
+        
+        // User Gesture 상수
+        private const val USER_GESTURE_TIMEOUT_MS = 5000L  // 유저 제스처 후 자동 복귀 시간 (5초)
         
         // PIP
         private const val ACTION_PIP_STOP_NAVIGATION = "com.dom.samplenavigation.action.PIP_STOP"
@@ -181,11 +190,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         val destination = intent.getStringExtra("destination")
         // 시뮬레이션 모드 플래그 (기본값: false)
         isSimulationMode = intent.getBooleanExtra("simulation_mode", false)
+        // 경로 옵션 (기본값: TRAOPTIMAL)
+        val routeOptionOrdinal = intent.getIntExtra("route_option", RouteOptionType.TRAOPTIMAL.ordinal)
+        selectedRouteOption = RouteOptionType.values().getOrNull(routeOptionOrdinal) ?: RouteOptionType.TRAOPTIMAL
 
         if (startLat != 0.0 && startLng != 0.0 && !destination.isNullOrEmpty()) {
             val startLocation = LatLng(startLat, startLng)
-            navigationViewModel.setRoute(startLocation, destination)
-            Timber.d("Navigation data set: $startLocation -> $destination, simulationMode=$isSimulationMode")
+            navigationViewModel.setRoute(startLocation, destination, selectedRouteOption)
+            Timber.d("Navigation data set: $startLocation -> $destination, simulationMode=$isSimulationMode, option=$selectedRouteOption")
         } else {
             Timber.w("Navigation data not available")
         }
@@ -228,10 +240,115 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 현재 위치 마커 생성
         createCurrentLocationMarker()
 
+        // 지도 제스처 리스너 설정
+        setupMapGestureListeners(naverMap)
+
         // 네비게이션 자동 시작
         isNavigating = true
         currentPathIndex = 0
         navigationViewModel.startNavigation()
+    }
+
+    /**
+     * 지도 제스처 리스너 설정
+     * 사용자가 지도를 조작할 때 감지하여 자동 추적을 중지하고 혼잡도를 표시
+     */
+    private fun setupMapGestureListeners(map: NaverMap) {
+        // 카메라 변경 감지 (줌, 팬, 틸트 등)
+        map.addOnCameraChangeListener { reason, animated ->
+            // reason이 0이면 프로그래밍 방식, 1 이상이면 사용자 제스처
+            if (reason > 0) {
+                onUserGestureDetected()
+            }
+        }
+
+        // 지도 클릭 감지
+        map.setOnMapClickListener { pointF, latLng ->
+            onUserGestureDetected()
+        }
+    }
+
+    /**
+     * 유저 제스처 감지 처리
+     * 자동 추적을 중지하고 전체 경로를 혼잡도별로 표시
+     */
+    private fun onUserGestureDetected() {
+        if (!isNavigating || currentRoute == null) return
+
+        val currentTime = System.currentTimeMillis()
+        lastUserGestureTime = currentTime
+
+        // 이미 제스처 모드면 무시
+        if (isUserGestureMode) {
+            // 자동 복귀 타이머 리셋
+            scheduleAutoFollowResume()
+            return
+        }
+
+        // 제스처 모드 활성화
+        isUserGestureMode = true
+        isShowingFullRoute = true
+
+        Timber.d("User gesture detected - entering gesture mode")
+
+        // 전체 경로를 혼잡도별로 표시
+        currentRoute?.let { route ->
+            displayRoute(route, showFullRoute = true)
+        }
+
+        // 버튼 텍스트 변경
+        binding.btnReturnToCurrentLocation.text = "현위치로"
+        binding.btnReturnToCurrentLocation.visibility = View.VISIBLE
+
+        // 자동 복귀 스케줄링 (5초 후 자동으로 추적 모드로 복귀)
+        scheduleAutoFollowResume()
+    }
+
+    /**
+     * 자동 추적 복귀 스케줄링
+     * 일정 시간 후 자동으로 추적 모드로 복귀
+     */
+    private fun scheduleAutoFollowResume() {
+        // 기존 작업 취소
+        autoFollowResumeJob?.cancel()
+
+        // 새 작업 스케줄링
+        autoFollowResumeJob = lifecycleScope.launch {
+            kotlinx.coroutines.delay(USER_GESTURE_TIMEOUT_MS)
+
+            // 제스처 모드가 여전히 활성화되어 있고, 최근 제스처가 없으면 복귀
+            if (isUserGestureMode) {
+                val timeSinceLastGesture = System.currentTimeMillis() - lastUserGestureTime
+                if (timeSinceLastGesture >= USER_GESTURE_TIMEOUT_MS) {
+                    resumeAutoFollow()
+                }
+            }
+        }
+    }
+
+    /**
+     * 자동 추적 모드로 복귀
+     */
+    private fun resumeAutoFollow() {
+        if (!isUserGestureMode) return
+
+        isUserGestureMode = false
+        isShowingFullRoute = false
+
+        Timber.d("Resuming auto follow mode")
+
+        // 경로를 앞부분만 표시로 변경
+        currentRoute?.let { route ->
+            displayRoute(route, showFullRoute = false)
+        }
+
+        // 현재 위치로 카메라 복귀
+        snappedLocation?.let { location ->
+            updateCameraFollow(location, currentBearing, currentSpeed)
+        }
+
+        // 버튼 텍스트 변경
+        binding.btnReturnToCurrentLocation.text = "전체 경로"
     }
 
     @SuppressLint("MissingPermission")
@@ -269,9 +386,12 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                         checkAndReroute(gpsLocation, route)
                     }
 
-                    // 3. Camera Follow: 스냅된 위치로 카메라 추적
-                    if (snappedLocation != null) {
+                    // 3. Camera Follow: 스냅된 위치로 카메라 추적 (제스처 모드가 아닐 때만)
+                    if (snappedLocation != null && !isUserGestureMode) {
                         updateCameraFollow(snappedLocation!!, currentBearing, currentSpeed)
+                        updateCurrentLocationMarker(snappedLocation!!)
+                    } else if (snappedLocation != null) {
+                        // 제스처 모드일 때는 마커만 업데이트
                         updateCurrentLocationMarker(snappedLocation!!)
                     }
 
@@ -331,7 +451,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         navigationViewModel.navigationRoute.observe(this) { route ->
             route?.let { newRoute ->
                 currentRoute = newRoute
-                displayRoute(newRoute)
+                displayRoute(newRoute, isShowingFullRoute)
 
                 // 재탐색 후 초기화
                 if (isRerouting) {
@@ -385,6 +505,44 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         binding.btnEnterPip.setOnClickListener {
             enterPictureInPictureModeIfSupported()
+        }
+
+        // 경로 전체 표시 버튼 (제스처 모드에서 사용)
+        binding.btnReturnToCurrentLocation.setOnClickListener {
+            toggleFullRouteView()
+        }
+    }
+
+    /**
+     * 전체 경로 표시 토글
+     */
+    private fun toggleFullRouteView() {
+        if (isShowingFullRoute) {
+            // 현재 위치로 복귀
+            resumeAutoFollow()
+        } else {
+            // 전체 경로 표시
+            isShowingFullRoute = true
+            isUserGestureMode = true
+            currentRoute?.let { route ->
+                displayRoute(route, showFullRoute = true)
+                
+                // 전체 경로 표시 시 카메라를 전체 경로에 맞춤
+                val bounds = com.naver.maps.geometry.LatLngBounds.Builder()
+                    .include(route.summary.startLocation)
+                    .include(route.summary.endLocation)
+                    .apply {
+                        route.path.forEach { point ->
+                            include(point)
+                        }
+                    }
+                    .build()
+                naverMap?.moveCamera(CameraUpdate.fitBounds(bounds, 100))
+                binding.btnReturnToCurrentLocation.text = "현위치로"
+            }
+            
+            // 자동 복귀 스케줄링
+            scheduleAutoFollowResume()
         }
     }
 
@@ -489,10 +647,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 smoothedBearing.toDouble()
             )
 
-            val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
-                .animate(CameraAnimation.Easing, 200)
-            map.moveCamera(cameraUpdate)
-
+            if(!isUserGestureMode) {
+                val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
+                    .animate(CameraAnimation.Easing, 200)
+                map.moveCamera(cameraUpdate)
+            }
             // 상태 저장
             currentZoom = zoom
             currentTilt = tilt
@@ -537,6 +696,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     /**
      * 경로 이탈 감지 및 재탐색 (OMS 스타일)
+     * 한국 도로는 우측 통행이므로 재탐색 위치를 약간 오른쪽으로 이동
      */
     private fun checkAndReroute(gpsLocation: LatLng, route: NavigationRoute) {
         val currentTime = System.currentTimeMillis()
@@ -547,17 +707,45 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             return
         }
 
+        // 재탐색 위치 계산: 현재 위치에서 약간 오른쪽으로 이동 (한국 도로 우측 통행 고려)
+        // 베어링을 기준으로 오른쪽으로 약 10-15m 이동
+        val rerouteLocation = offsetLocationToRight(gpsLocation, currentBearing, 12.0)  // 12m 오른쪽
+
         // 재탐색 실행
         isRerouting = true
         lastRerouteTime = currentTime
-        Timber.d("Rerouting triggered from: $gpsLocation")
+        Timber.d("Rerouting triggered from: $gpsLocation -> $rerouteLocation (offset to right)")
         
         if (voiceGuideManager.isReady()) {
             voiceGuideManager.speakPlain("경로를 재탐색합니다")
         }
         
-        navigationViewModel.reroute(gpsLocation)
+        navigationViewModel.reroute(rerouteLocation)
         binding.tvCurrentInstruction.text = "경로를 재검색 중입니다..."
+    }
+
+    /**
+     * 위치를 베어링 기준으로 오른쪽으로 이동 (한국 도로 우측 통행 고려)
+     * @param location 원본 위치
+     * @param bearing 현재 진행 방향 (도)
+     * @param offsetMeters 오른쪽으로 이동할 거리 (미터)
+     * @return 오른쪽으로 이동한 위치
+     */
+    private fun offsetLocationToRight(location: LatLng, bearing: Float, offsetMeters: Double): LatLng {
+        // 베어링을 라디안으로 변환
+        val bearingRad = Math.toRadians(bearing.toDouble())
+        
+        // 오른쪽 방향 = 베어링 - 90도
+        val rightBearingRad = bearingRad - Math.PI / 2
+        
+        // 위도 1도 ≈ 111km, 경도는 위도에 따라 다름
+        val latOffset = offsetMeters / 111000.0 * cos(rightBearingRad)
+        val lngOffset = offsetMeters / (111000.0 * cos(Math.toRadians(location.latitude))) * sin(rightBearingRad)
+        
+        return LatLng(
+            location.latitude + latOffset,
+            location.longitude + lngOffset
+        )
     }
 
     // ==================== OMS 스타일: Distance/Time Calculation ====================
@@ -657,7 +845,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         binding.tvCurrentInstruction.text = messageWithDistance
     }
 
-    private fun displayRoute(route: NavigationRoute) {
+    private fun displayRoute(route: NavigationRoute, showFullRoute: Boolean = false) {
         val nMap = naverMap ?: return
 
         // 기존 경로 오버레이만 제거 (화살표는 유지)
@@ -665,14 +853,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         pathOverlays.clear()
         endMarker?.map = null
 
-        // 경로 표시
-        pathOverlays.add(PathOverlay().apply {
-            coords = route.path
-            color = resources.getColor(R.color.skyBlue, null)
-            outlineColor = Color.WHITE
-            width = 40
-            map = nMap
-        })
+        if (showFullRoute) {
+            // 전체 경로를 혼잡도별로 표시 (MainActivity와 동일한 방식)
+            displayRouteWithCongestion(route, nMap)
+        } else {
+            // 현재 위치 기준 앞부분만 표시 (기본)
+            displayRouteAhead(route, nMap)
+        }
 
         // 도착지 마커
         endMarker = Marker().apply {
@@ -681,7 +868,129 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             map = nMap
         }
 
-        Timber.d("Route displayed with ${route.path.size} points")
+        Timber.d("Route displayed with ${route.path.size} points, showFullRoute=$showFullRoute")
+    }
+
+    /**
+     * 경로를 혼잡도별로 표시 (전체 경로)
+     */
+    private fun displayRouteWithCongestion(route: NavigationRoute, nMap: NaverMap) {
+        if (route.sections.isEmpty()) {
+            // sections가 없으면 전체 경로를 하나로 표시
+            pathOverlays.add(PathOverlay().apply {
+                coords = route.path
+                color = resources.getColor(R.color.skyBlue, null)
+                outlineColor = Color.WHITE
+                width = 40
+                map = nMap
+            })
+            return
+        }
+
+        // 혼잡도에 따라 경로를 구간별로 나눠서 표시
+        val groupedPaths = mutableListOf<Pair<List<LatLng>, Int>>()
+        val sortedSections = route.sections.sortedBy { it.pointIndex }
+        
+        var currentCongestion: Int? = null
+        var currentPathGroup = mutableListOf<LatLng>()
+        var lastEndIndex = 0
+        
+        sortedSections.forEachIndexed { index, section ->
+            val startIndex = section.pointIndex
+            val endIndex = minOf(startIndex + section.pointCount, route.path.size)
+            
+            // 첫 섹션 이전의 경로 처리
+            if (index == 0 && startIndex > 0) {
+                val beforePath = route.path.subList(0, startIndex)
+                if (beforePath.isNotEmpty() && beforePath.size >= 2) {
+                    val firstCongestion = section.congestion
+                    groupedPaths.add(Pair(beforePath, firstCongestion))
+                }
+            }
+            
+            // 섹션 사이의 빈 구간 처리
+            if (startIndex > lastEndIndex) {
+                val gapPath = route.path.subList(lastEndIndex, startIndex)
+                if (gapPath.isNotEmpty() && gapPath.size >= 2) {
+                    val gapCongestion = currentCongestion ?: section.congestion
+                    groupedPaths.add(Pair(gapPath, gapCongestion))
+                }
+            }
+            
+            // 현재 섹션의 경로 처리
+            val sectionPath = route.path.subList(startIndex, endIndex)
+            
+            if (section.congestion == currentCongestion) {
+                currentPathGroup.addAll(sectionPath)
+            } else {
+                if (currentPathGroup.size >= 2 && currentCongestion != null) {
+                    groupedPaths.add(Pair(currentPathGroup.toList(), currentCongestion))
+                }
+                currentPathGroup = sectionPath.toMutableList()
+                currentCongestion = section.congestion
+            }
+            
+            lastEndIndex = endIndex
+        }
+        
+        // 마지막 그룹 저장
+        if (currentPathGroup.size >= 2 && currentCongestion != null) {
+            groupedPaths.add(Pair(currentPathGroup, currentCongestion))
+        }
+        
+        // 마지막 섹션 이후의 남은 경로 처리
+        if (lastEndIndex < route.path.size) {
+            val remainingPath = route.path.subList(lastEndIndex, route.path.size)
+            if (remainingPath.isNotEmpty() && remainingPath.size >= 2) {
+                val lastCongestion = currentCongestion ?: sortedSections.lastOrNull()?.congestion ?: 1
+                groupedPaths.add(Pair(remainingPath, lastCongestion))
+            }
+        }
+        
+        // 그룹화된 경로들을 PathOverlay로 표시
+        groupedPaths.forEach { (path, congestion) ->
+            val overlay = PathOverlay().apply {
+                coords = path
+                color = getCongestionColor(congestion)
+                outlineColor = Color.WHITE
+                width = 40
+                map = nMap
+            }
+            pathOverlays.add(overlay)
+        }
+    }
+
+    /**
+     * 경로의 앞부분만 표시 (현재 위치 기준)
+     */
+    private fun displayRouteAhead(route: NavigationRoute, nMap: NaverMap) {
+        // 현재 위치 이후의 경로만 표시
+        val startIndex = currentPathIndex.coerceIn(0, route.path.size - 1)
+        val pathAhead = route.path.subList(startIndex, route.path.size)
+        
+        if (pathAhead.size >= 2) {
+            pathOverlays.add(PathOverlay().apply {
+                coords = pathAhead
+                color = resources.getColor(R.color.skyBlue, null)
+                outlineColor = Color.WHITE
+                width = 40
+                map = nMap
+            })
+        }
+    }
+
+    /**
+     * 혼잡도에 따른 색상 반환
+     * @param congestion 0: 값없음(회색), 1: 원활(녹색), 2: 서행(주황색), 3: 혼잡(빨간색)
+     */
+    private fun getCongestionColor(congestion: Int): Int {
+        return when (congestion) {
+            0 -> 0xFF808080.toInt() // 값없음: 회색
+            1 -> 0xFF00AA00.toInt() // 원활: 녹색
+            2 -> 0xFFFFAA00.toInt() // 서행: 주황색
+            3 -> 0xFFFF0000.toInt() // 혼잡: 빨간색
+            else -> 0xFF808080.toInt() // 기타: 회색
+        }
     }
 
     private fun createCurrentLocationMarker() {
@@ -985,7 +1294,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         directionArrowOverlay = null
 
         // 화살표 경로 생성 (현재 instruction의 분기점 기준)
-        val (arrowPath, center) = createDirectionArrow(instruction, route)
+        val (arrowPath, _) = createDirectionArrow(instruction, route)
 
         // ArrowheadPathOverlay 사용: 경로를 따라가고 끝에 자동으로 화살표 머리가 생김
         if (arrowPath.size >= 2) {
@@ -1296,6 +1605,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         super.onDestroy()
         stopNavigationMode()
         stopSimulation()  // 시뮬레이션 중지
+        autoFollowResumeJob?.cancel()  // 자동 복귀 작업 취소
         navigationManager.stopNavigation()
         voiceGuideManager.release()
 

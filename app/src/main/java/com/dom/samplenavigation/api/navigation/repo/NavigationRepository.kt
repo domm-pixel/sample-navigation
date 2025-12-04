@@ -65,7 +65,8 @@ class NavigationRepository @Inject constructor(
     fun getPathWithCoordinates(
         startLat: Double,
         startLng: Double,
-        endAddress: String
+        endAddress: String,
+        routeOption: String? = null  // 경로 옵션 (trafast, traoptimal, traavoidtoll)
     ): Flow<Result<ResultPath>> {
         return flow {
             try {
@@ -80,8 +81,11 @@ class NavigationRepository @Inject constructor(
                 // 2. 좌표로 경로 찾기
                 val startCoordsString = "$startLng,$startLat" // lng,lat 형식
                 val endCoordsString = "${endCoords.second},${endCoords.first}" // lng,lat 형식
+                
+                // 경로 옵션이 지정되지 않으면 기본값 사용
+                val option = routeOption ?: NAVER_ROUTE_OPTIONS
 
-                val response = naverDirectionApi.getPath(startCoordsString, endCoordsString, NAVER_ROUTE_OPTIONS)
+                val response = naverDirectionApi.getPath(startCoordsString, endCoordsString, option)
                 if (response.isSuccessful) {
                     response.body()?.let {
                         emit(Result.success(it))

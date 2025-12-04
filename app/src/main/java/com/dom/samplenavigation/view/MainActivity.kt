@@ -113,6 +113,13 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     intent.putExtra("destination", mainViewModel.destinationAddress!!)
                     // 시뮬레이션 모드 플래그 전달
                     intent.putExtra("simulation_mode", switchSimulationMode.isChecked)
+                    // 선택된 경로 옵션 전달
+                    val selectedOption = routeOptions.firstOrNull { 
+                        it.route == mainViewModel.navigationRoute.value 
+                    }?.optionType
+                    if (selectedOption != null) {
+                        intent.putExtra("route_option", selectedOption.ordinal)
+                    }
                     // 경로 데이터도 전달 (Parcelable로 전달)
                     if (currentRoute != null) {
                         // NavigationRoute를 Intent로 전달하려면 Parcelable로 구현해야 합니다
