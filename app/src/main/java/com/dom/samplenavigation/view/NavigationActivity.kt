@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.util.Rational
 import android.view.View
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.viewModels
 import androidx.annotation.RequiresPermission
@@ -104,6 +105,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var isGestureMode = false  // 유저 제스처 모드 (지도 조작 중)
     private var lastGestureTime: Long = 0  // 마지막 유저 제스처 시간
     private var gestureTimeoutJob: Job? = null  // 제스처 타임아웃 작업
+    private var isRerouteNavigation = false  // 재탐색으로 인한 네비게이션 시작 여부
 
     // Simulation Mode
     private var isSimulationMode: Boolean = false  // 시뮬레이션 모드 플래그
@@ -247,6 +249,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         naverMap.uiSettings.isLocationButtonEnabled = false
         naverMap.uiSettings.isZoomControlEnabled = false
         naverMap.buildingHeight = 0.2f
+        naverMap.mapType = NaverMap.MapType.Navi
 
         // 운전자 시야 확보를 위해 지도 중심을 화면 하단 쪽으로 오프셋
         val density = resources.displayMetrics.density
@@ -482,8 +485,12 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             // 네비게이션 모드 자동 전환
             if (state.isNavigating) {
                 startNavigationMode()
+                // 네비게이션 중에는 화면이 꺼지지 않도록 설정
+                keepScreenOn(true)
             } else {
                 stopNavigationMode()
+                // 네비게이션 종료 시 화면 켜짐 유지 해제
+                keepScreenOn(false)
             }
 
             // OMS 스타일: Location Snapping 및 Camera Follow
@@ -564,8 +571,40 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             if (shouldPlay == true) {
                 navigationManager.currentInstruction.value?.let { instruction ->
                     if (voiceGuideManager.isReady()) {
-                        voiceGuideManager.speakNavigationStart(instruction)
-                        Timber.d("Navigation start announcement: 경로 안내를 시작합니다 + ${instruction.message}")
+                        if (isRerouteNavigation) {
+                            // 재탐색인 경우: "경로를 재탐색했습니다" + 첫 안내
+                            voiceGuideManager.speakPlain("경로를 재탐색했습니다")
+                            // 첫 안내 메시지도 재생 (QUEUE_ADD로 순차 재생)
+                            // speakInstruction은 queueMode를 받지 않으므로, 직접 speak을 사용
+                            val distance = instruction.distanceToInstruction
+                            val cleanMessage = instruction.message
+                                .replace(Regex("\\d+\\s*킬로미터\\s*(후|전방|앞)\\s*"), "")
+                                .replace(Regex("\\d+\\s*미터\\s*(후|전방|앞)\\s*"), "")
+                                .replace(Regex("\\d+\\.?\\d*\\s*km\\s*(후|전방|앞)\\s*"), "")
+                                .replace(Regex("\\d+\\s*m\\s*(후|전방|앞)\\s*"), "")
+                                .trim()
+                            val message = when {
+                                distance >= 1000 -> {
+                                    val km = distance / 1000.0
+                                    "${String.format("%.1f", km)}킬로미터 후 $cleanMessage"
+                                }
+                                distance >= 500 -> "500미터 후 $cleanMessage"
+                                distance >= 300 -> "300미터 후 $cleanMessage"
+                                distance >= 100 -> {
+                                    val hm = (distance / 100) * 100
+                                    "${hm}미터 후 $cleanMessage"
+                                }
+                                distance >= 50 -> "곧 $cleanMessage"
+                                else -> cleanMessage
+                            }
+                            voiceGuideManager.speak(message, android.speech.tts.TextToSpeech.QUEUE_ADD)
+                            Timber.d("Reroute announcement: 경로를 재탐색했습니다 + ${instruction.message}")
+                            isRerouteNavigation = false  // 플래그 리셋
+                        } else {
+                            // 최초 시작인 경우: "경로 안내를 시작합니다" + 첫 안내
+                            voiceGuideManager.speakNavigationStart(instruction)
+                            Timber.d("Navigation start announcement: 경로 안내를 시작합니다 + ${instruction.message}")
+                        }
                     }
                 }
             }
@@ -580,6 +619,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 // 재탐색 후 초기화
                 if (isRerouting) {
                     isRerouting = false
+                    isRerouteNavigation = true  // 재탐색 플래그 설정
                     Toast.makeText(this, "경로를 재검색했습니다", Toast.LENGTH_SHORT).show()
 
                     // 재탐색 후 스냅 위치 초기화
@@ -590,6 +630,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     updateCurrentLocationMarker(snappedLocation!!)
                 } else {
                     // 최초 시작 시 출발지로 초기화
+                    isRerouteNavigation = false  // 최초 시작이므로 재탐색 아님
                     snappedLocation = newRoute.summary.startLocation
                     currentPathIndex = 0
                     updateCurrentLocationMarker(snappedLocation!!)
@@ -845,9 +886,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         lastRerouteTime = currentTime
         Timber.d("Rerouting triggered from: $gpsLocation -> $rerouteLocation (offset to right)")
 
-        if (voiceGuideManager.isReady()) {
-            voiceGuideManager.speakPlain("경로를 재탐색합니다")
-        }
+        // 음성 안내는 재탐색 완료 후 shouldPlayNavigationStart에서 처리
+        // (중복 방지를 위해 여기서는 제거)
 
         navigationViewModel.reroute(rerouteLocation)
         binding.tvCurrentInstruction.text = "경로를 재검색 중입니다..."
@@ -1214,6 +1254,20 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         naverMap?.let { map ->
             map.locationTrackingMode = LocationTrackingMode.Follow
             Timber.d("Navigation mode stopped")
+        }
+    }
+
+    /**
+     * 화면 켜짐 유지 설정/해제
+     * 네비게이션 중에는 화면이 꺼지지 않도록 합니다.
+     */
+    private fun keepScreenOn(keepOn: Boolean) {
+        if (keepOn) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            Timber.d("Screen keep-on enabled for navigation")
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            Timber.d("Screen keep-on disabled")
         }
     }
 
@@ -1798,6 +1852,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         gestureTimeoutJob?.cancel()  // 제스처 타임아웃 작업 취소
         navigationManager.stopNavigation()
         voiceGuideManager.release()
+        
+        // 화면 켜짐 유지 해제
+        keepScreenOn(false)
 
         try {
             fusedCallback?.let { cb ->
