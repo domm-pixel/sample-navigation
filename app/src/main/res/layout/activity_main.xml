@@ -25,6 +25,17 @@
             android:layout_marginTop="20dp"
             app:layout_constraintTop_toTopOf="parent">
 
+            <!-- 설정 버튼 -->
+            <ImageButton
+                android:id="@+id/btnSettings"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:src="@android:drawable/ic_menu_preferences"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="차량 정보 설정"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
             <!-- 목적지 입력 -->
             <EditText
                 android:id="@+id/etDestination"
@@ -39,8 +50,9 @@
                 android:clickable="true"
                 android:focusable="true"
                 app:layout_constraintEnd_toStartOf="@+id/tvSearch"
-                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/btnSettings"
                 app:layout_constraintTop_toTopOf="parent"
+                android:layout_marginStart="8dp"
                 android:layout_marginEnd="8dp" />
 
             <!-- 검색 버튼 -->

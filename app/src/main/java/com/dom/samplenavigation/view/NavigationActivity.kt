@@ -39,6 +39,7 @@ import com.dom.samplenavigation.navigation.model.RouteOptionType
 import com.dom.samplenavigation.navigation.voice.VoiceGuideManager
 import com.dom.samplenavigation.view.viewmodel.NavigationViewModel
 import com.dom.samplenavigation.api.telemetry.model.VehicleLocationPayload
+import com.dom.samplenavigation.util.VehiclePreferences
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -136,8 +137,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var isVoiceGuideEnabled: Boolean = true
     private var suppressVoiceSwitchCallback: Boolean = false
 
-    // Telemetry navType (MainActivity에서 전달받아 사용)
-    private var navTypeForTelemetry: Int = 1
+    // Vehicle Preferences (차량 정보 저장/로드)
+    private lateinit var vehiclePreferences: VehiclePreferences
 
     // Picture-in-Picture
     private var isInPictureInPictureModeCompat: Boolean = false
@@ -197,6 +198,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // Fused client 초기화
         fusedClient = LocationServices.getFusedLocationProviderClient(this)
 
+        // VehiclePreferences 초기화
+        vehiclePreferences = VehiclePreferences(this)
+
         // 네비게이션 매니저 초기화
         navigationManager = NavigationManager(this, lifecycleScope)
         voiceGuideManager = VoiceGuideManager(this)
@@ -215,8 +219,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         selectedRouteOption =
             RouteOptionType.entries.getOrNull(routeOptionOrdinal) ?: RouteOptionType.TRAOPTIMAL
 
-        // Telemetry용 navType (기본값 1)
-        navTypeForTelemetry = intent.getIntExtra("nav_type", 1)
+        // navBasicId는 VehiclePreferences에서 직접 읽음 (Intent로 전달 불필요)
 
         if (startLat != 0.0 && startLng != 0.0 && !destination.isNullOrEmpty()) {
             val startLocation = LatLng(startLat, startLng)
@@ -885,17 +888,17 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         // 재탐색 위치 계산: 현재 위치에서 약간 오른쪽으로 이동 (한국 도로 우측 통행 고려)
         // 베어링을 기준으로 오른쪽으로 약 10-15m 이동
-        val rerouteLocation = offsetLocationToRight(gpsLocation, currentBearing, 12.0)  // 12m 오른쪽
+//        val rerouteLocation = gpsLocation//offsetLocationToRight(gpsLocation, currentBearing, 0.0)  // 12m 오른쪽
 
         // 재탐색 실행
         isRerouting = true
         lastRerouteTime = currentTime
-        Timber.d("Rerouting triggered from: $gpsLocation -> $rerouteLocation (offset to right)")
+//        Timber.d("Rerouting triggered from: $gpsLocation -> $rerouteLocation (offset to right)")
 
         // 음성 안내는 재탐색 완료 후 shouldPlayNavigationStart에서 처리
         // (중복 방지를 위해 여기서는 제거)
 
-        navigationViewModel.reroute(rerouteLocation)
+        navigationViewModel.reroute(gpsLocation)
         binding.tvCurrentInstruction.text = "경로를 재검색 중입니다..."
     }
 
@@ -991,6 +994,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         binding.tvRemainingDistance.text = "남은 거리: ${String.format("%.1f", distanceKm)}km"
         binding.tvRemainingTime.text = "남은 시간: $timeString"
+
+        // 현재 속도 표시 (m/s → km/h 변환)
+        val speedKmh = (currentSpeed * 3.6f).toInt()
+        binding.tvCurrentSpeed.text = if (speedKmh > 0) {
+            "${speedKmh} km/h"
+        } else {
+            "-- km/h"
+        }
 
         // 다음 안내 메시지 업데이트
         updateNextInstructionUI(state.nextInstruction)
@@ -1417,7 +1428,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 regDate = regDate
             )
 
-            val vehicleId = navTypeForTelemetry
+            // 저장된 navBasicId 사용
+            val vehicleId = vehiclePreferences.getNavBasicId()
 
             navigationViewModel.sendTelemetry(vehicleId, payload)
             Timber.d("Telemetry sent: lat=${location.latitude}, lon=${location.longitude}, acc=${location.accuracy}m")

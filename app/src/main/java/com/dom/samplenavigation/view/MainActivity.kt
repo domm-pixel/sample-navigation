@@ -24,6 +24,7 @@ import com.dom.samplenavigation.navigation.model.NavigationOptionRoute
 import com.dom.samplenavigation.navigation.model.NavigationRoute
 import com.dom.samplenavigation.view.adapter.RouteOptionAdapter
 import com.dom.samplenavigation.view.viewmodel.MainViewModel
+import com.dom.samplenavigation.util.VehiclePreferences
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.naver.maps.geometry.LatLng
@@ -54,7 +55,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
     private var currentRoute: NavigationRoute? = null
     private lateinit var routeOptionAdapter: RouteOptionAdapter
     private var routeOptions: List<NavigationOptionRoute> = emptyList()
-    private var selectedNavType: Int = 1  // Telemetry용 vecNavType 값
+    private lateinit var vehiclePreferences: VehiclePreferences
     
     companion object {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1000
@@ -64,6 +65,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
         super.onCreate(savedInstanceState)
         
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        vehiclePreferences = VehiclePreferences(this)
 
         routeOptionAdapter = RouteOptionAdapter { option ->
             mainViewModel.selectRoute(option)
@@ -77,12 +79,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                 adapter = routeOptionAdapter
             }
 
-            // 목적지 입력 (클릭 시 입력 다이얼로그 표시 또는 직접 텍스트 입력)
-//            tvDestination.setOnClickListener {
-//                // 간단한 예시: 직접 텍스트 입력 가능하도록
-//                // 실제로는 EditText나 다이얼로그를 사용하는 것이 좋습니다
-//                tvDestination.text = "서울특별시 종로구 사직로 161"
-//            }
+            // 설정 버튼 클릭
+            btnSettings.setOnClickListener {
+                showVehicleSettingsDialog()
+            }
 
             // 검색 버튼 클릭
             tvSearch.setOnClickListener {
@@ -95,55 +95,42 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     return@setOnClickListener
                 }
                 
-                if (currentLocation == null) {
-                    Toast.makeText(this@MainActivity, "현재 위치를 가져오는 중입니다", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
+                // 경로 탐색 전에 현재 위치 재확인
+                Toast.makeText(this@MainActivity, "현재 위치를 확인하는 중...", Toast.LENGTH_SHORT).show()
+                getCurrentLocation { location ->
+                    if (location != null) {
+                        // 최신 위치로 경로 검색
+                        val carType = vehiclePreferences.getCarType()
+                        mainViewModel.searchPath(location, destination, carType)
+                    } else {
+                        Toast.makeText(this@MainActivity, "현재 위치를 가져올 수 없습니다", Toast.LENGTH_SHORT).show()
+                    }
                 }
-                
-                // 경로 검색
-                mainViewModel.searchPath(currentLocation!!, destination)
             }
 
             // 안내 시작 버튼 클릭
             btnStartNavigation.setOnClickListener {
                 if (currentLocation != null && mainViewModel.destinationAddress != null) {
-                    // vecNavType 입력 다이얼로그
-                    val input = EditText(this@MainActivity).apply {
-                        inputType = InputType.TYPE_CLASS_NUMBER
-                        setText(selectedNavType.toString())
+                    // 네비게이션 화면으로 이동하면서 데이터 전달
+                    val intent = Intent(this@MainActivity, NavigationActivity::class.java)
+                    intent.putExtra("start_lat", currentLocation!!.latitude)
+                    intent.putExtra("start_lng", currentLocation!!.longitude)
+                    intent.putExtra("destination", mainViewModel.destinationAddress!!)
+                    // 시뮬레이션 모드 플래그 전달
+                    intent.putExtra("simulation_mode", switchSimulationMode.isChecked)
+                    // 선택된 경로 옵션 전달
+                    val selectedOption = routeOptions.firstOrNull {
+                        it.route == mainViewModel.navigationRoute.value
+                    }?.optionType
+                    if (selectedOption != null) {
+                        intent.putExtra("route_option", selectedOption.ordinal)
                     }
+                    // navBasicId는 NavigationActivity에서 VehiclePreferences로 직접 읽음
 
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("번호를 입력하세요! 입력: 성순님 1번, 태훈님 2번...")
-                        .setView(input)
-                        .setPositiveButton("확인") { _, _ ->
-                            val navType = input.text.toString().toIntOrNull() ?: 1
-                            selectedNavType = navType
+                    startActivity(intent)
 
-                            // 네비게이션 화면으로 이동하면서 데이터 전달
-                            val intent = Intent(this@MainActivity, NavigationActivity::class.java)
-                            intent.putExtra("start_lat", currentLocation!!.latitude)
-                            intent.putExtra("start_lng", currentLocation!!.longitude)
-                            intent.putExtra("destination", mainViewModel.destinationAddress!!)
-                            // 시뮬레이션 모드 플래그 전달
-                            intent.putExtra("simulation_mode", switchSimulationMode.isChecked)
-                            // 선택된 경로 옵션 전달
-                            val selectedOption = routeOptions.firstOrNull {
-                                it.route == mainViewModel.navigationRoute.value
-                            }?.optionType
-                            if (selectedOption != null) {
-                                intent.putExtra("route_option", selectedOption.ordinal)
-                            }
-                            // Telemetry용 navType 전달
-                            intent.putExtra("nav_type", selectedNavType)
-
-                            startActivity(intent)
-
-                            // 안내 시작 후 경로 및 주소 정보 초기화
-                            clearRoute()
-                        }
-                        .setNegativeButton("취소", null)
-                        .show()
+                    // 안내 시작 후 경로 및 주소 정보 초기화
+                    clearRoute()
                 }
             }
         }
@@ -384,10 +371,55 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
     }
     
     /**
+     * 차량 정보 설정 다이얼로그
+     */
+    private fun showVehicleSettingsDialog() {
+        val savedNavBasicId = vehiclePreferences.getNavBasicId()
+        val savedCarType = vehiclePreferences.getCarType()
+
+        val layout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(50, 40, 50, 10)
+        }
+
+        val navBasicIdInput = EditText(this).apply {
+            hint = "차량 번호 (navBasicId)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(savedNavBasicId.toString())
+        }
+
+        val carTypeInput = EditText(this).apply {
+            hint = "차량 유형 (1: 소형, 2: 중형, 3: 대형)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(savedCarType.toString())
+        }
+
+        layout.addView(navBasicIdInput)
+        layout.addView(carTypeInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("차량 정보 설정")
+            .setView(layout)
+            .setPositiveButton("저장") { _, _ ->
+                val navBasicId = navBasicIdInput.text.toString().toIntOrNull() ?: 1
+                val carType = carTypeInput.text.toString().toIntOrNull()?.coerceIn(1, 3) ?: 1
+
+                vehiclePreferences.saveNavBasicId(navBasicId)
+                vehiclePreferences.saveCarType(carType)
+
+                Toast.makeText(this, "차량 정보가 저장되었습니다", Toast.LENGTH_SHORT).show()
+                Timber.d("Vehicle settings saved: navBasicId=$navBasicId, carType=$carType")
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    /**
      * 현재 위치 가져오기 (FusedLocationProvider 사용 - 더 정확하고 빠름)
+     * @param callback 위치를 가져온 후 호출되는 콜백 (null이면 기존 방식으로 동작)
      */
     @SuppressLint("MissingPermission")
-    private fun getCurrentLocation() {
+    private fun getCurrentLocation(callback: ((LatLng?) -> Unit)? = null) {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
             != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(
@@ -407,6 +439,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     if (location != null) {
                         val latLng = LatLng(location.latitude, location.longitude)
                         updateCurrentLocation(latLng)
+                        callback?.invoke(latLng)
                         Timber.d("Current location obtained: $latLng (getCurrentLocation)")
                         return@addOnSuccessListener
                     }
@@ -416,15 +449,24 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                         if (lastLocation != null) {
                             val latLng = LatLng(lastLocation.latitude, lastLocation.longitude)
                             updateCurrentLocation(latLng)
+                            callback?.invoke(latLng)
                             Timber.d("Current location obtained: $latLng (lastLocation fallback)")
                         } else {
                             // 3) lastLocation도 없으면 기존 LocationManager 방식 사용
                             Timber.w("FusedLocationProvider failed, using LocationManager fallback")
-                            fallbackToLocationManager()
+                            if (callback != null) {
+                                fallbackToLocationManager(callback)
+                            } else {
+                                fallbackToLocationManager()
+                            }
                         }
                     }.addOnFailureListener { e ->
                         Timber.e("lastLocation failed: ${e.message}, using LocationManager fallback")
-                        fallbackToLocationManager()
+                        if (callback != null) {
+                            fallbackToLocationManager(callback)
+                        } else {
+                            fallbackToLocationManager()
+                        }
                     }
                 }
                 .addOnFailureListener { e ->
@@ -434,14 +476,23 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                         if (lastLocation != null) {
                             val latLng = LatLng(lastLocation.latitude, lastLocation.longitude)
                             updateCurrentLocation(latLng)
+                            callback?.invoke(latLng)
                             Timber.d("Current location obtained: $latLng (lastLocation after getCurrentLocation failed)")
                         } else {
                             Timber.w("All FusedLocationProvider methods failed, using LocationManager fallback")
-                            fallbackToLocationManager()
+                            if (callback != null) {
+                                fallbackToLocationManager(callback)
+                            } else {
+                                fallbackToLocationManager()
+                            }
                         }
                     }.addOnFailureListener { lastLocError ->
                         Timber.e("All location methods failed: ${lastLocError.message}")
-                        fallbackToLocationManager()
+                        if (callback != null) {
+                            fallbackToLocationManager(callback)
+                        } else {
+                            fallbackToLocationManager()
+                        }
                     }
                 }
         } catch (e: SecurityException) {
@@ -456,25 +507,42 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
      * LocationManager 폴백 (FusedLocationProvider 실패 시)
      */
     @SuppressLint("MissingPermission")
-    private fun fallbackToLocationManager() {
+    private fun fallbackToLocationManager(callback: ((LatLng?) -> Unit)? = null) {
         try {
             val lastKnownLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
             if (lastKnownLocation != null) {
                 val latLng = LatLng(lastKnownLocation.latitude, lastKnownLocation.longitude)
                 updateCurrentLocation(latLng)
+                callback?.invoke(latLng)
                 Timber.d("Current location obtained: $latLng (LocationManager fallback)")
             } else {
                 // 실시간 위치 요청
+                val listener = if (callback != null) {
+                    object : LocationListener {
+                        override fun onLocationChanged(location: Location) {
+                            val latLng = LatLng(location.latitude, location.longitude)
+                            updateCurrentLocation(latLng)
+                            callback.invoke(latLng)
+                            locationManager.removeUpdates(this)
+                        }
+                        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                        override fun onProviderEnabled(provider: String) {}
+                        override fun onProviderDisabled(provider: String) {}
+                    }
+                } else {
+                    locationListener
+                }
                 locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
                     1000L,
                     1f,
-                    locationListener
+                    listener
                 )
                 Timber.d("Requesting location updates from LocationManager")
             }
         } catch (e: SecurityException) {
             Timber.e("LocationManager fallback failed: ${e.message}")
+            callback?.invoke(null)
         }
     }
     

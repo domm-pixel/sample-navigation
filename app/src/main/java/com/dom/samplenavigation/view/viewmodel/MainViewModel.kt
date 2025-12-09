@@ -30,8 +30,8 @@ class MainViewModel @Inject constructor(
 
     var destinationAddress: String? = null
 
-    fun searchPath(startLocation: LatLng, destination: String) {
-        Timber.d("🔍 Searching path from $startLocation to $destination")
+    fun searchPath(startLocation: LatLng, destination: String, carType: Int = 1) {
+        Timber.d("🔍 Searching path from $startLocation to $destination (carType=$carType)")
 
         viewModelScope.launch {
             try {
@@ -43,7 +43,9 @@ class MainViewModel @Inject constructor(
                 navigationRepository.getPathWithCoordinates(
                     startLocation.latitude,
                     startLocation.longitude,
-                    destination
+                    destination,
+                    routeOption = null,
+                    carType = carType
                 ).collect { result ->
                     result.onSuccess { resultPath ->
                         val optionRoutes = NavigationMapper.mapToNavigationOptionRoutes(resultPath)
