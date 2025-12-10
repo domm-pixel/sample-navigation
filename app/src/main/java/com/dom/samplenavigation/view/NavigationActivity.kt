@@ -117,6 +117,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var currentSpeed: Float = 0f
     private var currentZoom: Double = 17.0
     private var currentTilt: Double = 0.0
+    private var isCameraUpdateFromCode: Boolean = false  // 코드에서 카메라 업데이트 중인지 플래그
 
     // 네비게이션 모드의 마지막 카메라 상태 (제스처 모드 복귀 시 사용)
     private var lastNavigationZoom: Double = 17.0
@@ -139,6 +140,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     // Vehicle Preferences (차량 정보 저장/로드)
     private lateinit var vehiclePreferences: VehiclePreferences
+
+    // Direction Arrow (분기점 화살표) 관리
+    private var previousInstructionPointIndex: Int? = null  // 이전 instruction의 pointIndex (분기점 지난 후 제거 확인용)
 
     // Picture-in-Picture
     private var isInPictureInPictureModeCompat: Boolean = false
@@ -182,7 +186,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         private const val SIMULATION_SPEED_KMH = 50f  // 시뮬레이션 속도 (km/h)
 
         // User Gesture 상수
-        private const val GESTURE_TIMEOUT = 10000L  // 유저 제스처 후 자동 복귀 시간 (10초)
+        private const val GESTURE_TIMEOUT = 5000L  // 유저 제스처 후 자동 복귀 시간 (5초)
 
         // PIP
         private const val ACTION_PIP_STOP_NAVIGATION = "com.dom.samplenavigation.action.PIP_STOP"
@@ -295,22 +299,76 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         }
 
         // 카메라 변경 감지 (줌, 팬, 틸트 등)
-        map.addOnCameraChangeListener { reason, _ ->
+        map.addOnCameraChangeListener { reason, animated ->
+            // 코드에서 카메라를 업데이트한 경우는 제외
+            if (isCameraUpdateFromCode) {
+                isCameraUpdateFromCode = false
+                Timber.d("Camera change ignored: from code, reason=$reason")
+                return@addOnCameraChangeListener
+            }
+            
+            // 네비게이션 중일 때만 제스처 감지
+            if (!isNavigating) {
+                Timber.d("Camera change ignored: not navigating, reason=$reason")
+                return@addOnCameraChangeListener
+            }
+            
             // 제스처로 인한 카메라 변경 감지
-            // NaverMap SDK의 카메라 변경 이유는 정수로 반환됨
+            // REASON_GESTURE는 사용자 제스처로 인한 변경
+            Timber.d("Camera change detected: reason=$reason, animated=$animated, isNavigating=$isNavigating")
             if (reason == CameraUpdate.REASON_GESTURE) {
+                Timber.d("User gesture detected from camera change: reason=GESTURE")
                 handleUserGesture()
+            } else {
+                Timber.d("Camera change but not GESTURE: reason=$reason")
             }
         }
+        
+        // 카메라 변경 완료 시 감지 (더 정확한 제스처 감지를 위해)
+//        map.setOnCameraIdleListener {
+//            // 코드에서 카메라를 업데이트한 경우는 제외
+//            if (isCameraUpdateFromCode) {
+//                isCameraUpdateFromCode = false
+//                return@setOnCameraIdleListener
+//            }
+//
+//            // 카메라가 멈춘 후 약간의 지연을 두고 제스처인지 확인
+//            // (네비게이션 카메라 업데이트와 구분하기 위해)
+//            if (!isNavigating) return@setOnCameraIdleListener
+//
+//            lifecycleScope.launch {
+//                kotlinx.coroutines.delay(150) // 150ms 지연 (카메라 애니메이션 완료 대기)
+//
+//                // 지연 후에도 코드에서 업데이트하지 않았다면 사용자 제스처로 간주
+//                if (!isCameraUpdateFromCode && isNavigating) {
+//                    val currentCameraZoom = naverMap?.cameraPosition?.zoom ?: 0.0
+//                    val currentCameraTilt = naverMap?.cameraPosition?.tilt ?: 0.0
+//
+//                    // 줌이나 틸트가 현재 저장된 값과 다르면 사용자 제스처로 간주
+//                    // (네비게이션 카메라 업데이트는 currentZoom/currentTilt와 동기화되므로)
+//                    val zoomDiff = kotlin.math.abs(currentCameraZoom - currentZoom)
+//                    val tiltDiff = kotlin.math.abs(currentCameraTilt - currentTilt)
+//
+//                    if (zoomDiff > 0.2 || tiltDiff > 1.0) {
+//                        Timber.d("User gesture detected from camera idle: zoomDiff=$zoomDiff, tiltDiff=$tiltDiff")
+//                        handleUserGesture()
+//                    }
+//                }
+//            }
+//        }
     }
 
     /**
      * 사용자 제스처 처리
      */
     private fun handleUserGesture() {
-        if (!isNavigating) return
+        if (!isNavigating) {
+            Timber.d("handleUserGesture: not navigating, ignoring")
+            return
+        }
 
         val currentTime = System.currentTimeMillis()
+        Timber.d("handleUserGesture called: isGestureMode=$isGestureMode, isNavigating=$isNavigating")
 
         // 제스처 모드 활성화
         if (!isGestureMode) {
@@ -321,6 +379,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         } else {
             // 제스처 모드가 이미 활성화된 경우 시간 갱신
             lastGestureTime = currentTime
+            Timber.d("User gesture detected - updating lastGestureTime: $currentTime")
         }
     }
 
@@ -400,6 +459,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 lastNavigationTilt,
                 bearing.toDouble()
             )
+            isCameraUpdateFromCode = true
             val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
                 .animate(CameraAnimation.Easing, 200)
             naverMap?.moveCamera(cameraUpdate)
@@ -429,6 +489,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     lastNavigationTilt,
                     bearing.toDouble()
                 )
+                isCameraUpdateFromCode = true
                 val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
                     .animate(CameraAnimation.Easing, 200)
                 naverMap?.moveCamera(cameraUpdate)
@@ -455,14 +516,25 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
         // 새 타이머 시작
         gestureTimeoutJob = lifecycleScope.launch {
+            Timber.d("Gesture timeout timer: waiting ${GESTURE_TIMEOUT}ms")
             kotlinx.coroutines.delay(GESTURE_TIMEOUT)
 
             // 제스처 모드가 여전히 활성화되어 있고, 최근 제스처가 없으면 복귀
+            val currentTime = System.currentTimeMillis()
+            val timeSinceLastGesture = currentTime - lastGestureTime
+            Timber.d("Gesture timeout timer: elapsed, isGestureMode=$isGestureMode, timeSinceLastGesture=${timeSinceLastGesture}ms, GESTURE_TIMEOUT=${GESTURE_TIMEOUT}ms")
+            
             if (isGestureMode) {
-                val timeSinceLastGesture = System.currentTimeMillis() - lastGestureTime
                 if (timeSinceLastGesture >= GESTURE_TIMEOUT) {
+                    Timber.d("Gesture timeout: returning to current location mode")
                     returnToCurrentLocationMode()
+                } else {
+                    Timber.d("Gesture timeout: but recent gesture detected (${timeSinceLastGesture}ms < ${GESTURE_TIMEOUT}ms), restarting timer")
+                    // 최근 제스처가 있었다면 타이머 재시작
+                    startGestureTimeoutTimer()
                 }
+            } else {
+                Timber.d("Gesture timeout: but isGestureMode is false, ignoring")
             }
         }
 
@@ -513,6 +585,17 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     val snapResult = snapLocationToRoute(gpsLocation, route.path, currentPathIndex)
                     snappedLocation = snapResult.snappedLocation
                     currentPathIndex = snapResult.pathIndex
+
+                    // 현재 instruction의 분기점을 지나쳤는지 확인하여 화살표 제거
+                    navigationManager.currentInstruction.value?.let { currentInstruction ->
+                        if (currentPathIndex > currentInstruction.pointIndex) {
+                            // 분기점을 지나쳤으므로 화살표 제거
+                            directionArrowOverlay?.map = null
+                            directionArrowOverlay = null
+                            previousInstructionPointIndex = currentInstruction.pointIndex
+                            Timber.d("Direction arrow removed: passed instruction pointIndex=${currentInstruction.pointIndex} (currentPathIndex=$currentPathIndex)")
+                        }
+                    }
 
                     // 2. 경로 이탈 감지 및 재탐색
                     val distanceToPath = calculateDistance(gpsLocation, snappedLocation!!)
@@ -645,6 +728,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     updateCurrentLocationMarker(snappedLocation!!)
                 }
 
+                // 재탐색 시 분기점 화살표 상태 초기화
+                previousInstructionPointIndex = null
+                directionArrowOverlay?.map = null
+                directionArrowOverlay = null
+
                 navigationManager.startNavigation(newRoute)
 
                 // 네비게이션 시작 시 즉시 3D 뷰로 전환
@@ -714,6 +802,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     }
                     .build()
                 // MainActivity와 동일한 패딩 사용
+                isCameraUpdateFromCode = true
                 naverMap?.moveCamera(CameraUpdate.fitBounds(bounds, 150))
             }
         }
@@ -827,6 +916,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 smoothedBearing.toDouble()
             )
 
+            isCameraUpdateFromCode = true
             val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
                 .animate(CameraAnimation.Easing, 200)
             map.moveCamera(cameraUpdate)
@@ -1469,6 +1559,17 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 snappedLocation = nextLocation
                 lastKnownLocation = nextLocation
 
+                // 현재 instruction의 분기점을 지나쳤는지 확인하여 화살표 제거
+                navigationManager.currentInstruction.value?.let { currentInstruction ->
+                    if (currentPathIndex > currentInstruction.pointIndex) {
+                        // 분기점을 지나쳤으므로 화살표 제거
+                        directionArrowOverlay?.map = null
+                        directionArrowOverlay = null
+                        previousInstructionPointIndex = currentInstruction.pointIndex
+                        Timber.d("Direction arrow removed (simulation): passed instruction pointIndex=${currentInstruction.pointIndex} (currentPathIndex=$currentPathIndex)")
+                    }
+                }
+
                 // 가짜 Location 객체 생성 및 저장
                 val simulatedLocation = createSimulatedLocation(nextLocation, route)
                 lastLocation = simulatedLocation
@@ -1598,15 +1699,32 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     /**
      * 분기점 화살표 업데이트
-     * 현재 instruction의 분기점에 화살표를 표시하고,
-     * 다음 instruction으로 넘어가면 자동으로 다음 분기점의 화살표로 업데이트됩니다.
+     * 현재 instruction의 분기점에 화살표를 표시합니다.
+     * 분기점을 지나친 후 (currentPathIndex > instruction.pointIndex) 현재 화살표를 제거합니다.
      */
     private fun updateDirectionArrow(instruction: Instruction, route: NavigationRoute) {
         val nMap = naverMap ?: return
 
-        // 기존 화살표 제거 (이전 분기점 화살표)
-        directionArrowOverlay?.map = null
-        directionArrowOverlay = null
+        // 현재 instruction의 pointIndex를 이미 지나쳤는지 확인
+        // 지나쳤다면 (currentPathIndex > instruction.pointIndex) 현재 화살표를 제거하고 생성하지 않음
+        if (currentPathIndex > instruction.pointIndex) {
+            // 분기점을 지나쳤으므로 현재 화살표 제거
+            directionArrowOverlay?.map = null
+            directionArrowOverlay = null
+            previousInstructionPointIndex = instruction.pointIndex
+            Timber.d("Direction arrow removed: passed instruction pointIndex=${instruction.pointIndex} (currentPathIndex=$currentPathIndex)")
+            return
+        }
+
+        // 이전 instruction의 pointIndex를 확인하여 이미 지나간 경우 이전 화살표 제거
+        previousInstructionPointIndex?.let { prevIndex ->
+            if (currentPathIndex > prevIndex) {
+                // 이전 분기점을 지났으므로 이전 화살표 제거
+                directionArrowOverlay?.map = null
+                directionArrowOverlay = null
+                Timber.d("Previous direction arrow removed: passed pointIndex=$prevIndex (currentPathIndex=$currentPathIndex)")
+            }
+        }
 
         // 화살표 경로 생성 (현재 instruction의 분기점 기준)
         val (arrowPath, _) = createDirectionArrow(instruction, route)
@@ -1621,7 +1739,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 map = nMap
                 zIndex = 1000  // 경로 위에 표시
             }
-            Timber.d("Direction arrow updated: instruction pointIndex=${instruction.pointIndex}, arrowPath size=${arrowPath.size}")
+            previousInstructionPointIndex = instruction.pointIndex
+            Timber.d("Direction arrow updated: instruction pointIndex=${instruction.pointIndex}, arrowPath size=${arrowPath.size}, currentPathIndex=$currentPathIndex")
         } else {
             Timber.d("Direction arrow not created: insufficient path points (${arrowPath.size})")
         }
@@ -1909,6 +2028,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 화살표 제거
         directionArrowOverlay?.map = null
         directionArrowOverlay = null
+        previousInstructionPointIndex = null
 
         navigationManager.stopNavigation()
         navigationViewModel.stopNavigation()
