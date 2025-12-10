@@ -124,7 +124,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private var lastNavigationTilt: Double = 10.0
     private var lastNavigationBearing: Float = 0f
     private var lastBearing: Float = 0f  // 일반 베어링 (경로 기반 계산용)
-    
+
     // Content Padding (전체 경로 표시 시 패딩 제거를 위해 저장)
     private var originalTopPadding: Int = 0
 
@@ -142,7 +142,8 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     private lateinit var vehiclePreferences: VehiclePreferences
 
     // Direction Arrow (분기점 화살표) 관리
-    private var previousInstructionPointIndex: Int? = null  // 이전 instruction의 pointIndex (분기점 지난 후 제거 확인용)
+    private var previousInstructionPointIndex: Int? =
+        null  // 이전 instruction의 pointIndex (분기점 지난 후 제거 확인용)
 
     // Picture-in-Picture
     private var isInPictureInPictureModeCompat: Boolean = false
@@ -306,13 +307,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 Timber.d("Camera change ignored: from code, reason=$reason")
                 return@addOnCameraChangeListener
             }
-            
+
             // 네비게이션 중일 때만 제스처 감지
             if (!isNavigating) {
                 Timber.d("Camera change ignored: not navigating, reason=$reason")
                 return@addOnCameraChangeListener
             }
-            
+
             // 제스처로 인한 카메라 변경 감지
             // REASON_GESTURE는 사용자 제스처로 인한 변경
             Timber.d("Camera change detected: reason=$reason, animated=$animated, isNavigating=$isNavigating")
@@ -323,7 +324,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 Timber.d("Camera change but not GESTURE: reason=$reason")
             }
         }
-        
+
         // 카메라 변경 완료 시 감지 (더 정확한 제스처 감지를 위해)
 //        map.setOnCameraIdleListener {
 //            // 코드에서 카메라를 업데이트한 경우는 제외
@@ -523,7 +524,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             val currentTime = System.currentTimeMillis()
             val timeSinceLastGesture = currentTime - lastGestureTime
             Timber.d("Gesture timeout timer: elapsed, isGestureMode=$isGestureMode, timeSinceLastGesture=${timeSinceLastGesture}ms, GESTURE_TIMEOUT=${GESTURE_TIMEOUT}ms")
-            
+
             if (isGestureMode) {
                 if (timeSinceLastGesture >= GESTURE_TIMEOUT) {
                     Timber.d("Gesture timeout: returning to current location mode")
@@ -680,16 +681,21 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                                     val km = distance / 1000.0
                                     "${String.format("%.1f", km)}킬로미터 후 $cleanMessage"
                                 }
+
                                 distance >= 500 -> "500미터 후 $cleanMessage"
                                 distance >= 300 -> "300미터 후 $cleanMessage"
                                 distance >= 100 -> {
                                     val hm = (distance / 100) * 100
                                     "${hm}미터 후 $cleanMessage"
                                 }
+
                                 distance >= 50 -> "곧 $cleanMessage"
                                 else -> cleanMessage
                             }
-                            voiceGuideManager.speak(message, android.speech.tts.TextToSpeech.QUEUE_ADD)
+                            voiceGuideManager.speak(
+                                message,
+                                android.speech.tts.TextToSpeech.QUEUE_ADD
+                            )
                             Timber.d("Reroute announcement: 경로를 재탐색했습니다 + ${instruction.message}")
                             isRerouteNavigation = false  // 플래그 리셋
                         } else {
@@ -895,7 +901,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
      * 속도와 방향에 따라 부드럽게 카메라 업데이트
      */
     private fun updateCameraFollow(location: LatLng, bearing: Float, speed: Float) {
-        if(isGestureMode) {
+        if (isGestureMode) {
             return
         }
         naverMap?.let { map ->
@@ -1194,13 +1200,13 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             1 -> R.drawable.ic_nav_straight_1
 
             // 좌회전 계열
-            2, 4, 8, 12 -> R.drawable.ic_nav_turn_left_2_4_8_12
+            2, 8, 12 -> R.drawable.ic_nav_turn_left_2_8_12
             11 -> R.drawable.ic_nav_turn_left_11
-            13 -> R.drawable.ic_nav_turn_left_13
+            4, 13 -> R.drawable.ic_nav_turn_left_4_13
 
             // 우회전 계열
-            3, 5, 15 -> R.drawable.ic_nav_turn_right_3_5_15
-            14 -> R.drawable.ic_turn_right_14
+            3, 15 -> R.drawable.ic_nav_turn_right_3_15
+            5, 14 -> R.drawable.ic_turn_right_5_14
             16 -> R.drawable.ic_turn_right_16
 
             // 유턴
@@ -1213,7 +1219,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             22, 34, 92, 104 -> R.drawable.ic_nav_roundabout_uturn_22_34_92_104
 
             // 로터리/회전교차로 - 좌측
-            23, 24, 93, 94 -> R.drawable.ic_nav_roundabout__left_23_24_93_94
+            23, 24, 93, 94 -> R.drawable.ic_nav_roundabout_left_23_24_93_94
             25, 95 -> R.drawable.ic_nav_roundabout_left_25_95
             26, 27, 96, 97 -> R.drawable.ic_nav_roundabout_left_26_27_96_97
 
@@ -2043,7 +2049,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         gestureTimeoutJob?.cancel()  // 제스처 타임아웃 작업 취소
         navigationManager.stopNavigation()
         voiceGuideManager.release()
-        
+
         // 화면 켜짐 유지 해제
         keepScreenOn(false)
 
