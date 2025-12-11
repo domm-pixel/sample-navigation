@@ -12,7 +12,7 @@ import androidx.lifecycle.MutableLiveData
 import com.dom.samplenavigation.navigation.model.Instruction
 import com.dom.samplenavigation.navigation.model.NavigationRoute
 import com.dom.samplenavigation.navigation.model.NavigationState
-import com.dom.samplenavigation.utils.PermissionUtils
+import com.dom.samplenavigation.util.PermissionUtils
 import com.naver.maps.geometry.LatLng
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

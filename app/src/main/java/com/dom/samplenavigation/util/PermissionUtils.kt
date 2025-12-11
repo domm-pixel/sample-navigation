@@ -1,4 +1,4 @@
-package com.dom.samplenavigation.utils
+package com.dom.samplenavigation.util
 
 import android.Manifest
 import android.content.Context
@@ -6,7 +6,7 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 
 object PermissionUtils {
-    
+
     /**
      * 위치 권한이 있는지 확인
      */
@@ -16,7 +16,7 @@ object PermissionUtils {
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
     }
-    
+
     /**
      * 필요한 권한들
      */
