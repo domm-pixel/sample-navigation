@@ -17,4 +17,21 @@
     <string name="pip_enter_content_description">미니화면으로 전환</string>
     <string name="pip_not_supported">이 기기는 PIP 모드를 지원하지 않습니다</string>
     <string name="pip_not_ready">안내를 시작한 후에만 미니화면 전환이 가능합니다</string>
+    
+    <!-- Navigation strings -->
+    <string name="navigation_rerouting">경로를 재검색 중입니다…</string>
+    <string name="navigation_arrived">목적지에 도착했습니다!</string>
+    <string name="navigation_reroute_complete">경로를 재검색했습니다</string>
+    <string name="navigation_stop_title">안내 종료</string>
+    <string name="navigation_stop_message">안내를 종료하시겠어요?</string>
+    <string name="navigation_stop_confirm">확인</string>
+    <string name="navigation_stop_cancel">취소</string>
+    <string name="navigation_location_permission_required">위치 권한이 필요합니다. 설정에서 권한을 허용해주세요.</string>
+    <string name="navigation_current_location">현위치로</string>
+    <string name="navigation_full_route">전체 경로</string>
+    <string name="navigation_destination">도착지</string>
+    <string name="navigation_remaining_distance">남은 거리: %1$s</string>
+    <string name="navigation_remaining_time">남은 시간: %1$s</string>
+    <string name="navigation_speed_format">%1$d km/h</string>
+    <string name="navigation_speed_unknown">-- km/h</string>
 </resources>

@@ -49,3 +49,5 @@ google-services.json
 *.hprof
 *.aab
 */release/*.apk
+
+/app/

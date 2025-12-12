@@ -11,12 +11,9 @@ import android.location.LocationManager
 import android.os.Bundle
 import android.view.View
 import android.widget.Toast
-import android.widget.EditText
-import android.text.InputType
 import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.appcompat.app.AlertDialog
 import com.dom.samplenavigation.R
 import com.dom.samplenavigation.base.BaseActivity
 import com.dom.samplenavigation.databinding.ActivityMainBinding
@@ -25,6 +22,7 @@ import com.dom.samplenavigation.navigation.model.NavigationRoute
 import com.dom.samplenavigation.view.adapter.RouteOptionAdapter
 import com.dom.samplenavigation.view.viewmodel.MainViewModel
 import com.dom.samplenavigation.util.VehiclePreferences
+import com.dom.samplenavigation.view.dialog.VehicleSettingsDialog
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.naver.maps.geometry.LatLng
@@ -374,44 +372,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
      * 차량 정보 설정 다이얼로그
      */
     private fun showVehicleSettingsDialog() {
-        val savedNavBasicId = vehiclePreferences.getNavBasicId()
-        val savedCarType = vehiclePreferences.getCarType()
-
-        val layout = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(50, 40, 50, 10)
-        }
-
-        val navBasicIdInput = EditText(this).apply {
-            hint = "차량 번호 (navBasicId)"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setText(savedNavBasicId.toString())
-        }
-
-        val carTypeInput = EditText(this).apply {
-            hint = "차량 유형 (1: 소형, 2: 중형, 3: 대형)"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setText(savedCarType.toString())
-        }
-
-        layout.addView(navBasicIdInput)
-        layout.addView(carTypeInput)
-
-        AlertDialog.Builder(this)
-            .setTitle("차량 정보 설정")
-            .setView(layout)
-            .setPositiveButton("저장") { _, _ ->
-                val navBasicId = navBasicIdInput.text.toString().toIntOrNull() ?: 1
-                val carType = carTypeInput.text.toString().toIntOrNull()?.coerceIn(1, 3) ?: 1
-
-                vehiclePreferences.saveNavBasicId(navBasicId)
-                vehiclePreferences.saveCarType(carType)
-
-                Toast.makeText(this, "차량 정보가 저장되었습니다", Toast.LENGTH_SHORT).show()
-                Timber.d("Vehicle settings saved: navBasicId=$navBasicId, carType=$carType")
-            }
-            .setNegativeButton("취소", null)
-            .show()
+        VehicleSettingsDialog().show(supportFragmentManager, "VehicleSettingsDialog")
     }
 
     /**
