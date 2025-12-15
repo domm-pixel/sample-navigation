@@ -11,11 +11,13 @@ class CameraController {
     private var currentTilt: Double = 0.0
     
     companion object {
-        private const val ZOOM_LOW_SPEED = 18.0  // 저속 줌
-        private const val ZOOM_DEFAULT = 17.0  // 기본 줌
-        private const val ZOOM_HIGH_SPEED = 16.0  // 고속 줌
-        private const val SPEED_THRESHOLD_SLOW = 4.2f  // ≈15km/h
-        private const val SPEED_THRESHOLD_FAST = 13.9f  // ≈50km/h
+        private const val ZOOM_LOW_SPEED = 18.0   // 저속 줌
+        private const val ZOOM_DEFAULT = 17.0     // 기본 줌
+        private const val ZOOM_HIGH_SPEED = 16.0  // 50~100km/h
+        private const val ZOOM_ULTRA_SPEED = 15.0 // 100km/h 이상
+        private const val SPEED_THRESHOLD_SLOW = 4.2f    // ≈15km/h
+        private const val SPEED_THRESHOLD_FAST = 13.9f   // ≈50km/h
+        private const val SPEED_THRESHOLD_ULTRA = 27.8f  // ≈100km/h
         private const val HIGH_SPEED_TILT = 45.0
         private const val DEFAULT_TILT = 30.0
         private const val BEARING_SMOOTH_ALPHA = 0.3f  // 베어링 스무딩 계수
@@ -27,9 +29,10 @@ class CameraController {
     fun calculateZoomFromSpeed(speedMps: Float): Double {
         val speedKmh = speedMps * 3.6f
         return when {
-            speedKmh < 15 -> ZOOM_LOW_SPEED  // 저속: 줌인
-            speedKmh > 50 -> ZOOM_HIGH_SPEED  // 고속: 줌아웃
-            else -> ZOOM_DEFAULT  // 기본
+            speedKmh < 15 -> ZOOM_LOW_SPEED          // 저속: 줌인
+            speedKmh >= 100 -> ZOOM_ULTRA_SPEED      // 초고속: 더 줌아웃
+            speedKmh >= 50 -> ZOOM_HIGH_SPEED         // 고속: 줌아웃
+            else -> ZOOM_DEFAULT                     // 기본
         }
     }
 
