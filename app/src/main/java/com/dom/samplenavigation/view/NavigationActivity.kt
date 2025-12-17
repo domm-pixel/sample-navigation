@@ -11,7 +11,6 @@ import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
-import android.graphics.Color
 import android.graphics.PointF
 import android.graphics.drawable.Icon
 import android.location.Location
@@ -55,9 +54,7 @@ import com.naver.maps.map.LocationTrackingMode
 import com.naver.maps.map.MapFragment
 import com.naver.maps.map.NaverMap
 import com.naver.maps.map.OnMapReadyCallback
-import com.naver.maps.map.overlay.PathOverlay
 import com.naver.maps.map.overlay.Marker
-import com.naver.maps.map.overlay.Overlay
 import com.naver.maps.map.overlay.OverlayImage
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Job
@@ -97,11 +94,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     // Map
     private var naverMap: NaverMap? = null
     private var isMapReady = false
-    // 지도 오버레이 (mapManager 내부로 이전했지만, 기존 코드 호환을 위해 유지)
-    private var pathOverlays: MutableList<Overlay> = mutableListOf()
-    private var endMarker: Marker? = null
     private var currentLocationMarker: Marker? = null
-    private var originalTopPadding: Int = 0
     private var isCameraUpdateFromCode: Boolean = false
 
     // Navigation State
@@ -122,8 +115,6 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
     // 카메라 상태 (cameraController로 이전했지만, 기존 코드 호환을 위해 유지)
     private var currentBearing: Float = 0f
-    private var currentZoom: Double = 17.0
-    private var currentTilt: Double = 0.0
     private var lastNavigationZoom: Double = 17.0
     private var lastNavigationTilt: Double = 10.0
     private var lastNavigationBearing: Float = 0f
