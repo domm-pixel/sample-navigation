@@ -572,19 +572,20 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                         // 제스처 모드 체크를 다시 수행 (제스처 모드 진입 시점에 카메라 추적을 즉시 중단)
                         if (snappedLocation != null && !isGestureMode && !isShowingFullRoute) {
                             // 속도 기반 줌/틸트 계산 및 베어링 스무딩
-                            val zoom = cameraController.calculateZoomFromSpeed(currentSpeed)
-                            val tilt = cameraController.calculateTiltFromSpeed(currentSpeed)
+                            val targetZoom = cameraController.calculateZoomFromSpeed(currentSpeed)
+                            val targetTilt = cameraController.calculateTiltFromSpeed(currentSpeed)
                             val smoothedBearing = cameraController.smoothBearing(cameraController.getCurrentBearing())
 
-                            cameraController.updateZoom(zoom)
-                            cameraController.updateTilt(tilt)
+                            // 줌/틸트 스무딩 적용
+                            val smoothedZoom = cameraController.updateZoom(targetZoom)
+                            val smoothedTilt = cameraController.updateTilt(targetTilt)
 
-                            mapManager?.updateCameraFollow(snappedLocation!!, smoothedBearing, zoom, tilt)
+                            mapManager?.updateCameraFollow(snappedLocation!!, smoothedBearing, smoothedZoom, smoothedTilt)
                             mapManager?.updateCurrentLocationMarker(snappedLocation!!)
 
-                            // 네비게이션 모드의 카메라 상태 저장
-                            lastNavigationZoom = zoom
-                            lastNavigationTilt = tilt
+                            // 네비게이션 모드의 카메라 상태 저장 (스무딩된 값 사용)
+                            lastNavigationZoom = smoothedZoom
+                            lastNavigationTilt = smoothedTilt
                             lastNavigationBearing = smoothedBearing
                             lastBearing = smoothedBearing
                         } else if (snappedLocation != null) {
@@ -1205,13 +1206,14 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
                 // 카메라 업데이트 (속도 기반 줌/틸트) - 제스처 모드나 전체 경로 표시 중에는 실행하지 않음
                 if (isMapReady && !isGestureMode && !isShowingFullRoute) {
-                    val zoom = cameraController.calculateZoomFromSpeed(currentSpeed)
-                    val tilt = cameraController.calculateTiltFromSpeed(currentSpeed)
+                    val targetZoom = cameraController.calculateZoomFromSpeed(currentSpeed)
+                    val targetTilt = cameraController.calculateTiltFromSpeed(currentSpeed)
                     val smoothedBearing = cameraController.smoothBearing(cameraController.getCurrentBearing())
 
-                    cameraController.updateZoom(zoom)
-                    cameraController.updateTilt(tilt)
-                    mapManager?.updateCameraFollow(nextLocation, smoothedBearing, zoom, tilt)
+                    // 줌/틸트 스무딩 적용
+                    val smoothedZoom = cameraController.updateZoom(targetZoom)
+                    val smoothedTilt = cameraController.updateTilt(targetTilt)
+                    mapManager?.updateCameraFollow(nextLocation, smoothedBearing, smoothedZoom, smoothedTilt)
                     mapManager?.updateCurrentLocationMarker(nextLocation)
                 } else if (isMapReady) {
                     // 제스처 모드일 때는 마커만 업데이트

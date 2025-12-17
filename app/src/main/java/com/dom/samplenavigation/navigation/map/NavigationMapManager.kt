@@ -227,7 +227,7 @@ class NavigationMapManager(
 
         isCameraUpdateFromCode = true
         val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
-            .animate(CameraAnimation.Easing, 200)
+            .animate(CameraAnimation.Easing, 300)  // 애니메이션 시간 증가 (200ms → 300ms)
         naverMap.moveCamera(cameraUpdate)
     }
 
@@ -261,7 +261,7 @@ class NavigationMapManager(
         )
         isCameraUpdateFromCode = true
         val cameraUpdate = CameraUpdate.toCameraPosition(cameraPosition)
-            .animate(CameraAnimation.Easing, 200)
+            .animate(CameraAnimation.Easing, 300)  // 애니메이션 시간 증가 (200ms → 300ms)
         naverMap.moveCamera(cameraUpdate)
     }
 

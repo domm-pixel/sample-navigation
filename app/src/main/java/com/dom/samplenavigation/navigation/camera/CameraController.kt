@@ -20,7 +20,9 @@ class CameraController {
         private const val SPEED_THRESHOLD_ULTRA = 27.8f  // ≈100km/h
         private const val HIGH_SPEED_TILT = 45.0
         private const val DEFAULT_TILT = 30.0
-        private const val BEARING_SMOOTH_ALPHA = 0.3f  // 베어링 스무딩 계수
+        private const val BEARING_SMOOTH_ALPHA = 0.2f  // 베어링 스무딩 계수 (더 부드럽게)
+        private const val ZOOM_SMOOTH_ALPHA = 0.3f     // 줌 스무딩 계수
+        private const val TILT_SMOOTH_ALPHA = 0.3f     // 틸트 스무딩 계수
     }
 
     /**
@@ -79,17 +81,21 @@ class CameraController {
     }
 
     /**
-     * 현재 줌 값 업데이트
+     * 현재 줌 값 업데이트 (스무딩 적용)
      */
-    fun updateZoom(zoom: Double) {
-        currentZoom = zoom
+    fun updateZoom(targetZoom: Double): Double {
+        val diff = targetZoom - currentZoom
+        currentZoom += diff * ZOOM_SMOOTH_ALPHA
+        return currentZoom
     }
 
     /**
-     * 현재 틸트 값 업데이트
+     * 현재 틸트 값 업데이트 (스무딩 적용)
      */
-    fun updateTilt(tilt: Double) {
-        currentTilt = tilt
+    fun updateTilt(targetTilt: Double): Double {
+        val diff = targetTilt - currentTilt
+        currentTilt += diff * TILT_SMOOTH_ALPHA
+        return currentTilt
     }
 
     /**
