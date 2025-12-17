@@ -31,9 +31,8 @@ class RouteOptionAdapter(
             item = item,
             isSelected = item.optionType == selectedType,
             onClick = {
-                if (selectedType != item.optionType) {
-                    updateSelectionInternal(item.optionType)
-                }
+                // 항상 선택 상태 업데이트 (같은 경로인 경우에도 선택 가능하도록)
+                updateSelectionInternal(item.optionType)
                 onRouteSelected(item)
             }
         )

@@ -164,9 +164,17 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     routeOptionAdapter.updateSelection(null)
                 } else {
                     rvRouteOptions.visibility = View.VISIBLE
-                    mainViewModel.navigationRoute.value?.let { selectedRoute ->
-                        options.firstOrNull { it.route == selectedRoute }?.let { selected ->
+                    // optionType으로 찾아서 같은 경로인 경우에도 선택 가능하도록 함
+                    val selectedOptionType = mainViewModel.getSelectedOptionType()
+                    if (selectedOptionType != null) {
+                        options.firstOrNull { it.optionType == selectedOptionType }?.let { selected ->
                             routeOptionAdapter.updateSelection(selected.optionType)
+                        }
+                    } else {
+                        mainViewModel.navigationRoute.value?.let { selectedRoute ->
+                            options.firstOrNull { it.route == selectedRoute }?.let { selected ->
+                                routeOptionAdapter.updateSelection(selected.optionType)
+                            }
                         }
                     }
                 }
@@ -179,7 +187,13 @@ class MainActivity : BaseActivity<ActivityMainBinding>(
                     displayRoute(route)
                     btnStartNavigation.visibility = View.VISIBLE
                     layoutSimulation.visibility = View.VISIBLE  // 시뮬레이션 스위치 표시
-                    val selected = routeOptions.firstOrNull { it.route == route }
+                    // optionType으로 찾아서 같은 경로인 경우에도 선택 가능하도록 함
+                    val selectedOptionType = mainViewModel.getSelectedOptionType()
+                    val selected = if (selectedOptionType != null) {
+                        routeOptions.firstOrNull { it.optionType == selectedOptionType }
+                    } else {
+                        routeOptions.firstOrNull { it.route == route }
+                    }
                     selected?.let { routeOptionAdapter.updateSelection(it.optionType) }
                     Timber.d("Route displayed, navigation button shown")
                 } else {

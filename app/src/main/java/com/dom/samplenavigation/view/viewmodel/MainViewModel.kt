@@ -28,6 +28,8 @@ class MainViewModel @Inject constructor(
     private val _errorMessage = MutableLiveData<String?>()
     val errorMessage: LiveData<String?> = _errorMessage
 
+    private var selectedOptionType: com.dom.samplenavigation.navigation.model.RouteOptionType? = null
+
     var destinationAddress: String? = null
 
     fun searchPath(startLocation: LatLng, destination: String, carType: Int = 1) {
@@ -73,6 +75,15 @@ class MainViewModel @Inject constructor(
     }
 
     fun selectRoute(option: NavigationOptionRoute) {
-        _navigationRoute.value = option.route
+        // 같은 route이더라도 optionType이 다르면 선택 가능하도록 함
+        if (selectedOptionType != option.optionType || _navigationRoute.value != option.route) {
+            selectedOptionType = option.optionType
+            _navigationRoute.value = option.route
+            Timber.d("Route selected: ${option.optionType.displayName}")
+        }
+    }
+    
+    fun getSelectedOptionType(): com.dom.samplenavigation.navigation.model.RouteOptionType? {
+        return selectedOptionType
     }
 }
