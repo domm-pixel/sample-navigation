@@ -242,8 +242,8 @@ class NavigationManager(
             // 진행률 계산
             val progress = calculateProgress(latLng, route)
             
-            // 남은 거리 계산
-            val remainingDistance = calculateRemainingDistance(latLng, route)
+            // 남은 거리 계산 (진행률 기반으로 계산하여 일관성 유지)
+            val remainingDistance = calculateRemainingDistanceFromProgress(progress, route)
             
             // 네비게이션 상태 업데이트
             _navigationState.value = NavigationState(
@@ -316,8 +316,8 @@ class NavigationManager(
         // 진행률 계산
         val progress = calculateProgress(location, route)
         
-        // 남은 거리 계산
-        val remainingDistance = calculateRemainingDistance(location, route)
+        // 남은 거리 계산 (진행률 기반으로 계산하여 일관성 유지)
+        val remainingDistance = calculateRemainingDistanceFromProgress(progress, route)
         
         // 디버깅 로그
         Timber.d("Navigation Update:")
@@ -380,26 +380,68 @@ class NavigationManager(
     
     /**
      * 진행률 계산 (0.0 ~ 1.0)
+     * 출발지와 목적지까지의 직선 거리를 사용하여 대략적인 진행률 계산
      */
     private fun calculateProgress(location: LatLng, route: NavigationRoute): Float {
         val totalDistance = route.summary.totalDistance
         if (totalDistance <= 0) return 0f
         
-        // 현재 위치에서 목적지까지의 거리
-        val remainingDistance = calculateRemainingDistance(location, route)
+        val startLocation = route.summary.startLocation
+        val destination = route.summary.endLocation
         
-        return (totalDistance - remainingDistance).toFloat() / totalDistance
+        // 출발지와의 직선 거리
+        val distanceFromStart = calculateDistance(startLocation, location)
+        // 목적지와의 직선 거리  
+        val distanceToDestination = calculateDistance(location, destination)
+        
+        // 출발지와 목적지 사이의 직선 거리 (전체 직선 거리)
+        val totalStraightDistance = calculateDistance(startLocation, destination)
+        
+        // 직선 거리가 0이면 0 반환
+        if (totalStraightDistance <= 0) return 0f
+        
+        // 출발지에서 현재 위치까지의 직선 거리 비율 계산
+        // 출발지에 가까우면 0에 가깝고, 목적지에 가까우면 1에 가까움
+        val straightProgress = distanceFromStart / totalStraightDistance
+        
+        // 하지만 실제 경로는 직선보다 길 수 있으므로, 보정 필요
+        // 전체 경로 거리와 직선 거리의 비율로 보정
+        val distanceRatio = totalDistance / totalStraightDistance
+        
+        // 진행률을 계산 (직선 진행률에 경로 비율을 고려)
+        // 출발지 근처(10% 미만)에서는 더 보수적으로 계산
+        val progress = if (straightProgress < 0.1f) {
+            // 출발지 근처에서는 더 보수적으로 (최대 5%까지만)
+            (straightProgress * 0.5f).coerceIn(0f, 0.05f)
+        } else {
+            // 일반적인 경우: 직선 진행률을 경로 비율로 보정
+            (straightProgress / distanceRatio).coerceIn(0f, 1f)
+        }
+        
+        return progress
     }
     
     /**
-     * 남은 거리 계산 (간단한 방법)
+     * 남은 거리 계산 (진행률 기반)
+     * 진행률과 일관성을 유지하기 위해 진행률을 사용하여 계산
      */
+    private fun calculateRemainingDistanceFromProgress(progress: Float, route: NavigationRoute): Int {
+        val totalDistance = route.summary.totalDistance
+        if (totalDistance <= 0) return 0
+        
+        // 남은 거리 = 전체 거리 * (1 - 진행률)
+        val remaining = totalDistance * (1.0f - progress.coerceIn(0f, 1f))
+        return remaining.toInt().coerceAtLeast(0)
+    }
+    
+    /**
+     * 남은 거리 계산 (직선 거리 - 레거시, 사용하지 않음)
+     */
+    @Deprecated("진행률 기반 계산 사용")
     private fun calculateRemainingDistance(location: LatLng, route: NavigationRoute): Int {
-        // 목적지까지의 직선 거리 계산 (실제 네비게이션에서는 이 방법이 더 실용적)
+        // 목적지까지의 직선 거리 계산
         val destination = route.summary.endLocation
         val directDistance = calculateDistance(location, destination)
-        
-        // 직선 거리를 남은 거리로 사용 (실제 네비게이션에서는 이 방법이 더 정확함)
         return directDistance.toInt()
     }
     

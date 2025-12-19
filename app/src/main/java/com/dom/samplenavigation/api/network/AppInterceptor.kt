@@ -1,4 +1,4 @@
-package com.dom.samplenavigation.api.a
+package com.dom.samplenavigation.api.network
 
 import android.net.ConnectivityManager
 import androidx.core.content.ContextCompat

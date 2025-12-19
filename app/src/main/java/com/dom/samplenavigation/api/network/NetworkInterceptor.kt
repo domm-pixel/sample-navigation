@@ -1,8 +1,5 @@
-package com.dom.samplenavigation.api.a
+package com.dom.samplenavigation.api.network
 
-import android.content.Intent
-import androidx.core.content.edit
-import com.dom.samplenavigation.NavApplication.Companion.pref
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import okhttp3.Interceptor
@@ -10,7 +7,6 @@ import okhttp3.Request
 import okhttp3.Response
 import timber.log.Timber
 import java.io.IOException
-import kotlin.jvm.java
 
 class NetworkInterceptor : Interceptor {
     @Throws(IOException::class)

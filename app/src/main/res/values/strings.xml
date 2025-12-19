@@ -30,8 +30,8 @@
     <string name="navigation_current_location">현위치로</string>
     <string name="navigation_full_route">전체 경로</string>
     <string name="navigation_destination">도착지</string>
-    <string name="navigation_remaining_distance">남은 거리: %1$s</string>
-    <string name="navigation_remaining_time">남은 시간: %1$s</string>
-    <string name="navigation_speed_format">%1$d km/h</string>
-    <string name="navigation_speed_unknown">-- km/h</string>
+    <string name="navigation_remaining_distance">%1$s km</string>
+    <string name="navigation_remaining_time">%1$s</string>
+    <string name="navigation_speed_format">%1$d</string>
+    <string name="navigation_speed_unknown">0</string>
 </resources>

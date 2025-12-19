@@ -1,4 +1,4 @@
-package com.dom.samplenavigation.api.a
+package com.dom.samplenavigation.api.network
 
 import java.io.IOException
 

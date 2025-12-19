@@ -1,7 +1,7 @@
 package com.dom.samplenavigation.di
 
 import com.dom.samplenavigation.BuildConfig
-import com.dom.samplenavigation.api.a.NullOnEmptyConverterFactory
+import com.dom.samplenavigation.api.network.NullOnEmptyConverterFactory
 import com.dom.samplenavigation.api.navigation.NaverDirectionApi
 import com.dom.samplenavigation.api.navigation.NaverMapApi
 import com.google.gson.GsonBuilder

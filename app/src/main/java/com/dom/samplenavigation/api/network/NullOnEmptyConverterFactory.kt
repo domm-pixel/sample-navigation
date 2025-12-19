@@ -1,4 +1,4 @@
-package com.dom.samplenavigation.api.a
+package com.dom.samplenavigation.api.network
 
 import okhttp3.ResponseBody
 import retrofit2.Converter
