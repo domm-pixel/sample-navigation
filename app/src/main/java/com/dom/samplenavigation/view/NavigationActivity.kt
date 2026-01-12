@@ -419,17 +419,21 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
             val bearing = if (lastNavigationBearing > 0) {
                 Timber.d("Using last navigation bearing: $lastNavigationBearing")
                 lastNavigationBearing
-            } else {
-                // 방향이 없으면 경로 기반으로 계산
-                if (currentRoute != null && currentPathIndex < currentRoute.path.size - 1) {
-                    val pathBearing = calculateBearingFromPath(currentRoute.path, currentPathIndex)
-                    Timber.d("Calculated bearing from path: $pathBearing")
-                    pathBearing
                 } else {
-                    Timber.d("Using last bearing: $lastBearing")
-                    lastBearing
+                    // 방향이 없으면 경로 기반으로 계산
+                    if (currentRoute != null && currentPathIndex < currentRoute.path.size - 1) {
+                        val pathBearing = calculateBearingFromPath(
+                            currentRoute.path,
+                            currentPathIndex,
+                            snappedLocation
+                        )
+                        Timber.d("Calculated bearing from path: $pathBearing")
+                        pathBearing
+                    } else {
+                        Timber.d("Using last bearing: $lastBearing")
+                        lastBearing
+                    }
                 }
-            }
 
             val cameraPosition = CameraPosition(
                 currentLocation,
@@ -456,7 +460,11 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                 val bearing = if (lastNavigationBearing > 0) {
                     lastNavigationBearing
                 } else if (currentPathIndex < currentRoute.path.size - 1) {
-                    calculateBearingFromPath(currentRoute.path, currentPathIndex)
+                    calculateBearingFromPath(
+                        currentRoute.path,
+                        currentPathIndex,
+                        snappedLocation
+                    )
                 } else {
                     lastBearing
                 }
@@ -518,14 +526,52 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     }
 
     /**
-     * 경로에서 베어링 계산
+     * 경로에서 베어링 계산 (스냅된 위치에서 경로의 앞부분을 향하도록)
+     * 현재 위치에서 약 50-100m 앞의 경로 지점을 향하도록 계산하여 더 부드러운 방향 제공
      */
-    private fun calculateBearingFromPath(path: List<LatLng>, currentIndex: Int): Float {
+    private fun calculateBearingFromPath(
+        path: List<LatLng>,
+        currentIndex: Int,
+        snappedLocation: LatLng? = null
+    ): Float {
         if (currentIndex >= path.size - 1) return lastBearing
 
-        val currentPoint = path[currentIndex]
-        val nextPoint = path[currentIndex + 1]
-        return calculateBearing(currentPoint, nextPoint)
+        val startPoint = snappedLocation ?: path[currentIndex]
+        
+        // 경로의 앞부분(약 50-100m 앞)을 찾기 위해 여러 포인트 확인
+        val targetDistanceMin = 50f  // 최소 50m 앞
+        val targetDistanceMax = 100f  // 최대 100m 앞
+        
+        // 최대 20개 포인트 앞까지 검색 (너무 멀리 가지 않도록)
+        val maxSearchIndex = minOf(currentIndex + 20, path.size - 1)
+        
+        var bestIndex = currentIndex + 1
+        var bestDistance = routeSnappingService.calculateDistance(startPoint, path[bestIndex])
+        
+        // 목표 범위(50-100m) 내의 최적 지점 찾기
+        for (i in (currentIndex + 1)..maxSearchIndex) {
+            val distance = routeSnappingService.calculateDistance(startPoint, path[i])
+            
+            // 목표 범위 내에 있으면 바로 사용
+            if (distance in targetDistanceMin..targetDistanceMax) {
+                return routeSnappingService.calculateBearing(startPoint, path[i])
+            }
+            
+            // 목표 범위를 넘어섰으면 이전 지점 사용
+            if (distance > targetDistanceMax) {
+                return routeSnappingService.calculateBearing(startPoint, path[bestIndex])
+            }
+            
+            // 목표 범위에 도달하지 않았지만 가장 가까운 지점 업데이트
+            if (distance > bestDistance) {
+                bestIndex = i
+                bestDistance = distance
+            }
+        }
+        
+        // 목표 거리를 찾지 못했지만 가장 가까운 유효한 다음 포인트 사용
+        
+        return lastBearing
     }
 
     @SuppressLint("MissingPermission")
@@ -590,9 +636,9 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                             // 3. Camera Follow: 스냅된 위치로 카메라 추적 (제스처 모드나 전체 경로 표시 모드가 아닐 때만)
                             // 제스처 모드 체크를 다시 수행 (제스처 모드 진입 시점에 카메라 추적을 즉시 중단)
                             if (snappedLocation != null && !isGestureMode && !isShowingFullRoute) {
-                                // 경로 기반 베어링 계산 (직진 시 올바른 방향 유지)
+                                // 경로 기반 베어링 계산 (스냅된 위치에서 경로의 앞부분을 향하도록)
                                 val pathBearing = if (currentPathIndex < route.path.size - 1) {
-                                    calculateBearingFromPath(route.path, currentPathIndex)
+                                    calculateBearingFromPath(route.path, currentPathIndex, snappedLocation)
                                 } else {
                                     cameraController.getCurrentBearing()
                                 }
@@ -1301,7 +1347,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
                     currentBearing = simulatedLocation.bearing
                 } else if (currentPathIndex > 0) {
                     val prevLocation = route.path[currentPathIndex - 1]
-                    currentBearing = calculateBearing(prevLocation, nextLocation)
+                    currentBearing = routeSnappingService.calculateBearing(prevLocation, nextLocation)
                 }
 
                 // CameraController 베어링 업데이트
@@ -1314,10 +1360,10 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
 
                 // 카메라 업데이트 (속도 기반 줌/틸트) - 제스처 모드나 전체 경로 표시 중에는 실행하지 않음
                 if (isMapReady && !isGestureMode && !isShowingFullRoute) {
-                    // 경로 기반 베어링 계산 (직진 시 올바른 방향 유지)
+                    // 경로 기반 베어링 계산 (스냅된 위치에서 경로의 앞부분을 향하도록)
                     val pathBearing =
-                        if (currentPathIndex > 0 && currentPathIndex < route.path.size) {
-                            calculateBearing(route.path[currentPathIndex - 1], nextLocation)
+                        if (currentPathIndex < route.path.size - 1) {
+                            calculateBearingFromPath(route.path, currentPathIndex, nextLocation)
                         } else {
                             cameraController.getCurrentBearing()
                         }
@@ -1400,7 +1446,7 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         // 베어링 설정
         if (currentPathIndex > 0 && currentPathIndex < route.path.size) {
             val prevLocation = route.path[currentPathIndex - 1]
-            val bearing = calculateBearing(prevLocation, latLng)
+            val bearing = routeSnappingService.calculateBearing(prevLocation, latLng)
             location.bearing = bearing
             location.bearingAccuracyDegrees = 5f
         }
@@ -1408,20 +1454,6 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
         return location
     }
 
-    /**
-     * 두 지점 간의 방향 계산 (도)
-     */
-    private fun calculateBearing(from: LatLng, to: LatLng): Float {
-        val lat1 = Math.toRadians(from.latitude)
-        val lat2 = Math.toRadians(to.latitude)
-        val deltaLng = Math.toRadians(to.longitude - from.longitude)
-
-        val y = sin(deltaLng) * cos(lat2)
-        val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(deltaLng)
-
-        val bearing = Math.toDegrees(atan2(y, x))
-        return normalizeBearing(bearing.toFloat())
-    }
 
     // ==================== Direction Arrow (분기점 화살표) ====================
 
@@ -1500,12 +1532,6 @@ class NavigationActivity : BaseActivity<ActivityNavigationBinding>(
     // RouteSnappingService에 위임
     private fun calculateDistance(latLng1: LatLng, latLng2: LatLng): Float {
         return routeSnappingService.calculateDistance(latLng1, latLng2)
-    }
-
-    private fun normalizeBearing(angle: Float): Float {
-        var normalized = angle % 360f
-        if (normalized < 0f) normalized += 360f
-        return normalized
     }
 
     private fun shortestAngleDiff(from: Float, to: Float): Float {

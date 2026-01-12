@@ -5,6 +5,9 @@ import com.naver.maps.geometry.LatLng
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import timber.log.Timber
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * 경로 스냅 로직을 처리하는 서비스
@@ -16,7 +19,7 @@ class RouteSnappingService {
     private val distanceResults = FloatArray(1)
     
     companion object {
-        private const val SNAP_TOLERANCE_M = 50f  // 경로 스냅 허용 거리 (미터)
+        private const val SNAP_TOLERANCE_M = 20f  // 경로 스냅 허용 거리 (미터)
         private const val SEARCH_RANGE = 100  // 현재 인덱스 주변 검색 범위
     }
 
@@ -111,10 +114,10 @@ class RouteSnappingService {
         val lat2 = Math.toRadians(to.latitude)
         val deltaLng = Math.toRadians(to.longitude - from.longitude)
 
-        val y = Math.sin(deltaLng) * Math.cos(lat2)
-        val x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng)
+        val y = sin(deltaLng) * cos(lat2)
+        val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(deltaLng)
 
-        val bearing = Math.toDegrees(Math.atan2(y, x))
+        val bearing = Math.toDegrees(atan2(y, x))
         return normalizeBearing(bearing.toFloat())
     }
 
